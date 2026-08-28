@@ -95,6 +95,14 @@ namespace VUMS.Editor
         {
             EditorApplication.delayCall -= RunAnalysisOnce;
             Analyze();
+            // 进度条关闭当帧的 Repaint 常被模态进度条抑制，延后一帧再强制重绘，确保结果真正刷新
+            EditorApplication.delayCall += DeferredRepaint;
+        }
+
+        private void DeferredRepaint()
+        {
+            EditorApplication.delayCall -= DeferredRepaint;
+            Repaint();
         }
 
         private void Analyze()
