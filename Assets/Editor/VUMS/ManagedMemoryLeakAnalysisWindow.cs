@@ -155,19 +155,22 @@ namespace VUMS.Editor
                 }
 
                 sb.AppendLine($"检测完成，共 {numLeaked} 个泄漏的 Managed Shell。");
+                sb.AppendLine();
+                if (numLeaked > 0)
+                {
+                    sb.AppendLine("按类型统计:");
+                    foreach (var kvp in leakedTypes.OrderByDescending(k => k.Value))
+                        sb.AppendLine($"  {kvp.Value} x {kvp.Key}");
+                    sb.AppendLine();
+                }
+                sb.AppendLine($"总耗时: {(DateTime.Now - totalStart).TotalMilliseconds:F0} ms");
+
                 if (numLeaked > 0)
                 {
                     sb.AppendLine();
                     sb.AppendLine("泄漏详情:");
                     sb.AppendLine(string.Join("\n", leakedLines));
-                    sb.AppendLine();
-                    sb.AppendLine("按类型统计:");
-                    foreach (var kvp in leakedTypes.OrderByDescending(k => k.Value))
-                        sb.AppendLine($"  {kvp.Value} x {kvp.Key}");
                 }
-
-                sb.AppendLine();
-                sb.AppendLine($"总耗时: {(DateTime.Now - totalStart).TotalMilliseconds:F0} ms");
 
                 _resultText = sb.ToString();
             }
