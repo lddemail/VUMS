@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
 using UMS.Analysis;
@@ -39,11 +40,12 @@ namespace VUMS.Editor
         private bool _hasManagedLeakResult;
         private int _managedObjectCount;
         private int _leakPage;
-        private readonly Dictionary<string, List<LeakedObjectInfo>> _leakedObjectsByType = new Dictionary<string, List<LeakedObjectInfo>>();
         private readonly List<LeakedObjectInfo> _leakedObjects = new List<LeakedObjectInfo>();
-        private string[] _leakTypeOptions = Array.Empty<string>();
-        private List<string> _leakTypeNames = new List<string>();
-        private int _selectedLeakTypeIndex;
+        private List<RetentionPathGroup> _leakGroups = new List<RetentionPathGroup>();
+        private int _leakDisplayMode;
+        private readonly string[] _leakDisplayModes = { "按路径聚合", "按对象查看" };
+        private readonly HashSet<string> _expandedLeakGroupKeys = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> _showLeakGroupObjectKeys = new HashSet<string>(StringComparer.Ordinal);
         private readonly List<RetainedObjectInfo> _largeObjects = new List<RetainedObjectInfo>();
         private string[] _largeObjectOptions = Array.Empty<string>();
         private bool[] _retentionNodeExpanded = Array.Empty<bool>();
@@ -224,29 +226,23 @@ namespace VUMS.Editor
                 return;
 
             GUILayout.Space(6);
-            if (_leakTypeNames.Count == 0)
-                return;
-
-            EditorGUI.BeginChangeCheck();
-            _selectedLeakTypeIndex = EditorGUILayout.Popup(
-                "选择泄漏类型",
-                _selectedLeakTypeIndex,
-                _leakTypeOptions);
-            if (EditorGUI.EndChangeCheck())
-                _leakPage = 0;
-
-            var selectedType = _leakTypeNames[_selectedLeakTypeIndex];
-            var typeObjects = _leakedObjectsByType[selectedType];
-
+            _leakDisplayMode = GUILayout.Toolbar(_leakDisplayMode, _leakDisplayModes);
             GUILayout.Space(4);
-            var pageCount = Mathf.Max(1, Mathf.CeilToInt(typeObjects.Count / (float)LeakPageSize));
+
+            if (_leakDisplayMode == 0)
+            {
+                DrawAggregatedLeakGroups(_leakedObjects, _leakGroups);
+                return;
+            }
+
+            var pageCount = Mathf.Max(1, Mathf.CeilToInt(_leakedObjects.Count / (float)LeakPageSize));
             _leakPage = Mathf.Clamp(_leakPage, 0, pageCount - 1);
             var startIndex = _leakPage * LeakPageSize;
-            var endIndex = Mathf.Min(startIndex + LeakPageSize, typeObjects.Count);
+            var endIndex = Mathf.Min(startIndex + LeakPageSize, _leakedObjects.Count);
 
             for (var index = startIndex; index < endIndex; index++)
             {
-                var leakedObject = typeObjects[index];
+                var leakedObject = _leakedObjects[index];
                 using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
                 {
                     leakedObject.Expanded = EditorGUILayout.Foldout(
@@ -261,7 +257,7 @@ namespace VUMS.Editor
                 }
             }
 
-            if (typeObjects.Count > LeakPageSize)
+            if (_leakedObjects.Count > LeakPageSize)
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
@@ -286,6 +282,98 @@ namespace VUMS.Editor
                     EditorGUI.EndDisabledGroup();
                 }
             }
+        }
+
+        private void DrawAggregatedLeakGroups(List<LeakedObjectInfo> objects, List<RetentionPathGroup> groups)
+        {
+            EditorGUILayout.LabelField(
+                $"{objects.Count:N0} 个泄漏对象聚合为 {groups.Count:N0} 条路径（按数量降序）。",
+                EditorStyles.miniLabel);
+
+            foreach (var group in groups)
+            {
+                using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+                {
+                    var expanded = _expandedLeakGroupKeys.Contains(group.Key);
+                    expanded = EditorGUILayout.Foldout(
+                        expanded,
+                        $"{group.Objects.Count:N0} 个（{group.Objects.Count * 100f / objects.Count:F1}%） | {GetRootSummary(group.Representative.RetentionPathNodes)}",
+                        true);
+                    SetGroupState(_expandedLeakGroupKeys, group.Key, expanded);
+                    if (!expanded)
+                        continue;
+
+                    DrawLeakedObjectRetentionNodes(group.Representative);
+                    GUILayout.Space(3);
+                    var showObjects = _showLeakGroupObjectKeys.Contains(group.Key);
+                    showObjects = EditorGUILayout.Foldout(
+                        showObjects,
+                        $"代表对象与地址（显示前 {Math.Min(10, group.Objects.Count):N0} 个）",
+                        true);
+                    SetGroupState(_showLeakGroupObjectKeys, group.Key, showObjects);
+                    if (!showObjects)
+                        continue;
+
+                    foreach (var item in group.Objects.Take(10))
+                        EditorGUILayout.SelectableLabel(
+                            $"{item.TypeName} @ 0x{item.Address:X}",
+                            GUILayout.Height(EditorGUIUtility.singleLineHeight));
+                }
+            }
+        }
+
+        private static List<RetentionPathGroup> BuildRetentionPathGroups(IEnumerable<LeakedObjectInfo> objects)
+        {
+            return objects
+                .GroupBy(item => BuildNormalizedPathKey(item.RetentionPathNodes), StringComparer.Ordinal)
+                .Select(group => new RetentionPathGroup
+                {
+                    Key = group.Key,
+                    Representative = group.First(),
+                    Objects = group.ToList(),
+                })
+                .OrderByDescending(group => group.Objects.Count)
+                .ThenBy(group => group.Key, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private static string BuildNormalizedPathKey(string[] nodes)
+        {
+            if (nodes == null || nodes.Length == 0)
+                return "(无路径)";
+
+            return string.Join("\u001F", nodes.Select(NormalizeRetentionNode));
+        }
+
+        private static string NormalizeRetentionNode(string node)
+        {
+            if (string.IsNullOrEmpty(node))
+                return "(空节点)";
+
+            var normalized = Regex.Replace(node, @"0x[0-9A-Fa-f]+", "0x*");
+            normalized = Regex.Replace(normalized, @"\[(?:\d+|0x[0-9A-Fa-f]+)\]", "[*]");
+            normalized = Regex.Replace(normalized, @"\bArray Element \d+ of\b", "Array Element * of");
+            normalized = Regex.Replace(normalized, @"\b(?:List|Collection) Element \d+ of\b", "Collection Element * of");
+            return normalized.Trim();
+        }
+
+        private static string GetRootSummary(string[] nodes)
+        {
+            if (nodes == null || nodes.Length == 0)
+                return "无可用路径";
+
+            // 路径按“目标对象 → 持有者 → ... → GC Root”排列。
+            // 聚合标题显示界面从上往下第二步（目标对象的直接持有者），更容易区分业务来源。
+            var summaryIndex = nodes.Length >= 2 ? 1 : 0;
+            return NormalizeRetentionNode(nodes[summaryIndex]);
+        }
+
+        private static void SetGroupState(HashSet<string> states, string key, bool enabled)
+        {
+            if (enabled)
+                states.Add(key);
+            else
+                states.Remove(key);
         }
 
         private void DrawLeakedObjectRetentionNodes(LeakedObjectInfo leakedObject)
@@ -423,11 +511,11 @@ namespace VUMS.Editor
             _leakPage = 0;
             _hasManagedLeakResult = false;
             _managedObjectCount = 0;
-            _leakedObjectsByType.Clear();
             _leakedObjects.Clear();
-            _leakTypeNames.Clear();
-            _leakTypeOptions = Array.Empty<string>();
-            _selectedLeakTypeIndex = 0;
+            _leakGroups.Clear();
+            _leakDisplayMode = 0;
+            _expandedLeakGroupKeys.Clear();
+            _showLeakGroupObjectKeys.Clear();
             _managedLeakResultText = "正在分析托管内存泄漏...";
             _duplicateStringResultText = "正在分析重复字符串...";
             _duplicateAvoidableBytes = 0;
@@ -462,6 +550,13 @@ namespace VUMS.Editor
             public string[] RetentionPathNodes;
             public bool Expanded;
             public bool[] RetentionNodeExpanded = Array.Empty<bool>();
+        }
+
+        private sealed class RetentionPathGroup
+        {
+            public string Key;
+            public LeakedObjectInfo Representative;
+            public List<LeakedObjectInfo> Objects;
         }
 
         private sealed class RetainedObjectInfo
@@ -639,7 +734,6 @@ namespace VUMS.Editor
                 EditorUtility.DisplayProgressBar("分析中", "正在检测泄漏的 Managed Shell...", 0.85f);
                 var unityObjects = allObjects.Where(i => i.InheritsFromUnityEngineObject(file)).ToArray();
 
-                _leakedObjectsByType.Clear();
                 _leakedObjects.Clear();
 
                 foreach (var obj in unityObjects)
@@ -655,26 +749,10 @@ namespace VUMS.Editor
                         RetentionPathNodes = GetSafeRetentionPathNodes(file, obj),
                     };
                     _leakedObjects.Add(leakedObject);
-
-                    if (!_leakedObjectsByType.TryGetValue(typeName, out var list))
-                    {
-                        list = new List<LeakedObjectInfo>();
-                        _leakedObjectsByType.Add(typeName, list);
-                    }
-                    list.Add(leakedObject);
                 }
 
-                var orderedLeakTypes = _leakedObjectsByType
-                    .OrderByDescending(kvp => kvp.Value.Count)
-                    .ThenBy(kvp => kvp.Key, StringComparer.Ordinal)
-                    .ToList();
-                _leakTypeNames = orderedLeakTypes.Select(kvp => kvp.Key).ToList();
-                _leakTypeOptions = orderedLeakTypes
-                    .Select(kvp => $"{kvp.Value.Count,6:N0} x | {kvp.Key}")
-                    .ToArray();
-
+                _leakGroups = BuildRetentionPathGroups(_leakedObjects);
                 _leakPage = 0;
-                _selectedLeakTypeIndex = 0;
                 _hasManagedLeakResult = true;
                 _managedLeakResultText = "";
                 _duplicateStringResultText = duplicateStringSb.ToString();

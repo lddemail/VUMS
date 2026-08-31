@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
 using UMS.Analysis;
@@ -324,11 +325,13 @@ namespace VUMS.Editor
                 if (counts[counts.Length - 1] <= counts[0])
                     continue;
 
+                var objects = lastSnapshot.Leaks.Where(item => item.TypeName == type).ToList();
                 _leakDeltas.Add(new LeakTypeDelta
                 {
                     TypeName = type,
                     Counts = counts,
-                    Objects = lastSnapshot.Leaks.Where(item => item.TypeName == type).Take(50).ToList(),
+                    Objects = objects,
+                    PathGroups = BuildRetentionPathGroups(objects),
                 });
             }
 
@@ -383,7 +386,7 @@ namespace VUMS.Editor
         private void DrawTypeDeltaTab()
         {
             EditorGUILayout.LabelField(
-                $"共 {_typeDiffs.Count:N0} 个类型发生变化（按最终快照相对 A 的 |Δ| 降序，显示前 200）。");
+                $"共 {_typeDiffs.Count:N0} 个类型数量发生变化（按最终快照相对 A 的 |Δ| 降序，显示前 200）。");
             if (_typeDiffs.Count == 0)
             {
                 EditorGUILayout.HelpBox("所选快照之间没有类型数量变化。", MessageType.Info);
@@ -427,18 +430,31 @@ namespace VUMS.Editor
                     continue;
 
                 EditorGUILayout.LabelField(
-                    $"快照 {lastName} 中该类型泄漏对象（显示前 {delta.Objects.Count:N0}，展开看路径）:",
+                    $"快照 {lastName} 中 {delta.Objects.Count:N0} 个对象聚合为 {delta.PathGroups.Count:N0} 条路径（按数量降序）:",
                     EditorStyles.miniLabel);
-                foreach (var leakedObject in delta.Objects)
+                foreach (var group in delta.PathGroups)
                 {
                     using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
                     {
-                        leakedObject.Expanded = EditorGUILayout.Foldout(
-                            leakedObject.Expanded,
-                            $"{leakedObject.TypeName} @ 0x{leakedObject.Address:X}",
+                        group.Expanded = EditorGUILayout.Foldout(
+                            group.Expanded,
+                            $"{group.Objects.Count:N0} 个（{group.Objects.Count * 100f / delta.Objects.Count:F1}%） | {GetRootSummary(group.Representative.RetentionPathNodes)}",
                             true);
-                        if (leakedObject.Expanded)
-                            DrawLeakedObjectRetentionNodes(leakedObject);
+                        if (!group.Expanded)
+                            continue;
+
+                        DrawLeakedObjectRetentionNodes(group.Representative);
+                        group.ShowObjects = EditorGUILayout.Foldout(
+                            group.ShowObjects,
+                            $"代表对象与地址（显示前 {Math.Min(10, group.Objects.Count):N0} 个）",
+                            true);
+                        if (!group.ShowObjects)
+                            continue;
+
+                        foreach (var item in group.Objects.Take(10))
+                            EditorGUILayout.SelectableLabel(
+                                $"{item.TypeName} @ 0x{item.Address:X}",
+                                GUILayout.Height(EditorGUIUtility.singleLineHeight));
                     }
                 }
             }
@@ -500,7 +516,8 @@ namespace VUMS.Editor
             var parts = new string[counts.Length];
             for (var index = 0; index < counts.Length; index++)
                 parts[index] = $"{_snapshots[index].Name}:{counts[index]:N0}";
-            return string.Join("  ", parts);
+            var delta = counts[counts.Length - 1] - counts[0];
+            return $"{string.Join("  ", parts)}  Δ:{(delta > 0 ? "+" : "")}{delta:N0}";
         }
 
         private static ulong RealUsedMemory(ProfileTargetMemoryStats memory)
@@ -526,6 +543,50 @@ namespace VUMS.Editor
                     preview = preview.Substring(0, 100) + "...";
                 EditorGUILayout.LabelField($"  {stat.Count,6:N0} x | 总计 {FormatBytes(stat.TotalBytes),10} | \"{preview}\"");
             }
+        }
+
+        private static List<RetentionPathGroup> BuildRetentionPathGroups(IEnumerable<LeakedObjectInfo> objects)
+        {
+            return objects
+                .GroupBy(item => BuildNormalizedPathKey(item.RetentionPathNodes), StringComparer.Ordinal)
+                .Select(group => new RetentionPathGroup
+                {
+                    Key = group.Key,
+                    Representative = group.First(),
+                    Objects = group.ToList(),
+                })
+                .OrderByDescending(group => group.Objects.Count)
+                .ThenBy(group => group.Key, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private static string BuildNormalizedPathKey(string[] nodes)
+        {
+            if (nodes == null || nodes.Length == 0)
+                return "(无路径)";
+            return string.Join("\u001F", nodes.Select(NormalizeRetentionNode));
+        }
+
+        private static string NormalizeRetentionNode(string node)
+        {
+            if (string.IsNullOrEmpty(node))
+                return "(空节点)";
+            var normalized = Regex.Replace(node, @"0x[0-9A-Fa-f]+", "0x*");
+            normalized = Regex.Replace(normalized, @"\[(?:\d+|0x[0-9A-Fa-f]+)\]", "[*]");
+            normalized = Regex.Replace(normalized, @"\bArray Element \d+ of\b", "Array Element * of");
+            normalized = Regex.Replace(normalized, @"\b(?:List|Collection) Element \d+ of\b", "Collection Element * of");
+            return normalized.Trim();
+        }
+
+        private static string GetRootSummary(string[] nodes)
+        {
+            if (nodes == null || nodes.Length == 0)
+                return "无可用路径";
+
+            // 路径按“目标对象 → 持有者 → ... → GC Root”排列。
+            // 聚合标题显示界面从上往下第二步（目标对象的直接持有者），更容易区分业务来源。
+            var summaryIndex = nodes.Length >= 2 ? 1 : 0;
+            return NormalizeRetentionNode(nodes[summaryIndex]);
         }
 
         private static void DrawLeakedObjectRetentionNodes(LeakedObjectInfo leakedObject)
@@ -685,6 +746,7 @@ namespace VUMS.Editor
             public string TypeName;
             public int[] Counts;
             public List<LeakedObjectInfo> Objects = new List<LeakedObjectInfo>();
+            public List<RetentionPathGroup> PathGroups = new List<RetentionPathGroup>();
             public bool Expanded;
         }
 
@@ -693,8 +755,16 @@ namespace VUMS.Editor
             public string TypeName;
             public ulong Address;
             public string[] RetentionPathNodes;
-            public bool Expanded;
             public bool[] RetentionNodeExpanded = Array.Empty<bool>();
+        }
+
+        private sealed class RetentionPathGroup
+        {
+            public string Key;
+            public LeakedObjectInfo Representative;
+            public List<LeakedObjectInfo> Objects;
+            public bool Expanded;
+            public bool ShowObjects;
         }
 
         private sealed class DuplicateStringStat
