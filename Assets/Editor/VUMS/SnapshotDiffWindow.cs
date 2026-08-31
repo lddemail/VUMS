@@ -43,22 +43,32 @@ namespace VUMS.Editor
 
         private void OnGUI()
         {
-            GUILayout.Label("Snapshot Diff", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox(
-                "按 A → B → C → D → E 顺序添加，不能跳过；最少 2 个、最多 5 个。A 为基准，最后一个快照为最终对比。",
-                MessageType.None);
+            VumsEditorStyles.EnsureInitialized();
+            var selectedCount = GetSelectedCount();
+            VumsEditorStyles.DrawHeader(
+                "多快照趋势对比",
+                "按 A → B → C → D → E 构建连续序列，以 A 为基准观察最终变化与中间趋势");
 
-            DrawSnapshotSelectors();
-            DrawAnalyzeButton();
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+            {
+                VumsEditorStyles.DrawSectionHeader(
+                    "快照序列",
+                    "至少选择 A、B 两个快照，最多五个；不能跳过槽位。清除任一快照时会同时清除其后的快照。");
+                DrawSnapshotSelectors();
+                GUILayout.Space(6f);
+                DrawAnalyzeButton();
+            }
 
             if (!_hasResult)
             {
-                EditorGUILayout.HelpBox(_statusText, MessageType.Info);
+                GUILayout.Space(VumsEditorStyles.SectionSpacing);
+                VumsEditorStyles.DrawStatus(_statusText, MessageType.Info);
                 return;
             }
 
-            GUILayout.Space(8);
-            _selectedTab = GUILayout.Toolbar(_selectedTab, _tabs);
+            GUILayout.Space(VumsEditorStyles.SectionSpacing);
+            _selectedTab = VumsEditorStyles.DrawTabs(_selectedTab, _tabs);
+            GUILayout.Space(6f);
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
             switch (_selectedTab)
             {
@@ -82,12 +92,18 @@ namespace VUMS.Editor
         {
             for (var index = 0; index < MaxSnapshotCount; index++)
             {
+                var hasPath = !string.IsNullOrEmpty(_paths[index]);
                 var canSelect = !_diffing && (index == 0 || !string.IsNullOrEmpty(_paths[index - 1]));
-                using (new EditorGUILayout.HorizontalScope())
+                using (new EditorGUILayout.HorizontalScope(VumsEditorStyles.CompactCard))
                 {
+                    var slotLabel = index == 0 ? $"{SnapshotNames[index]}  基准" : SnapshotNames[index];
+                    GUILayout.Label(slotLabel, VumsEditorStyles.SectionTitle, GUILayout.Width(72f));
+
                     EditorGUI.BeginDisabledGroup(!canSelect);
-                    var suffix = index == 0 ? " (基准)" : "";
-                    if (GUILayout.Button($"选择快照 {SnapshotNames[index]}{suffix}", GUILayout.Width(160)))
+                    if (GUILayout.Button(
+                            hasPath ? "重新选择" : "选择快照",
+                            VumsEditorStyles.SecondaryButton,
+                            GUILayout.Width(92f)))
                     {
                         var startDir = GetStartDirectory(index);
                         var picked = EditorUtility.OpenFilePanel($"选择快照 {SnapshotNames[index]}", startDir, "snap");
@@ -100,12 +116,12 @@ namespace VUMS.Editor
                     EditorGUI.EndDisabledGroup();
 
                     EditorGUI.BeginDisabledGroup(true);
-                    EditorGUILayout.TextField(_paths[index] ?? "");
+                    EditorGUILayout.TextField(hasPath ? _paths[index] : "未选择", GUILayout.Height(24f));
                     EditorGUI.EndDisabledGroup();
 
-                    var canClear = !_diffing && !string.IsNullOrEmpty(_paths[index]);
+                    var canClear = !_diffing && hasPath;
                     EditorGUI.BeginDisabledGroup(!canClear);
-                    if (GUILayout.Button("清除", GUILayout.Width(52)))
+                    if (GUILayout.Button("清除", VumsEditorStyles.DangerButton, GUILayout.Width(56f)))
                         ClearFrom(index);
                     EditorGUI.EndDisabledGroup();
                 }
@@ -115,14 +131,23 @@ namespace VUMS.Editor
         private void DrawAnalyzeButton()
         {
             var selectedCount = GetSelectedCount();
-            GUILayout.Space(6);
-            EditorGUI.BeginDisabledGroup(_diffing || selectedCount < 2);
-            if (GUILayout.Button(_diffing ? "分析中..." : $"分析 {selectedCount} 个快照", GUILayout.Height(30)))
-                BeginAnalysis();
-            EditorGUI.EndDisabledGroup();
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.Label(
+                    selectedCount < 2
+                        ? "至少选择 A 和 B 后才能分析"
+                        : $"已选择 {selectedCount} 个快照，Δ = {SnapshotNames[selectedCount - 1]} − A",
+                    VumsEditorStyles.MutedLabel);
+                GUILayout.FlexibleSpace();
 
-            if (selectedCount < 2)
-                EditorGUILayout.LabelField("至少还需要选择快照 A 和 B。", EditorStyles.miniLabel);
+                EditorGUI.BeginDisabledGroup(_diffing || selectedCount < 2);
+                if (GUILayout.Button(
+                        _diffing ? "正在分析..." : $"开始分析 {selectedCount} 个快照",
+                        VumsEditorStyles.PrimaryButton,
+                        GUILayout.Width(180f)))
+                    BeginAnalysis();
+                EditorGUI.EndDisabledGroup();
+            }
         }
 
         private string GetStartDirectory(int index)
@@ -344,28 +369,30 @@ namespace VUMS.Editor
         {
             foreach (var snapshot in _snapshots)
             {
-                using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+                using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
                 {
-                    GUILayout.Label($"快照 {snapshot.Name}{(snapshot.Name == "A" ? " (基准)" : "")}", EditorStyles.miniBoldLabel);
+                    VumsEditorStyles.DrawSectionHeader(
+                        $"快照 {snapshot.Name}{(snapshot.Name == "A" ? "（基准）" : "")}",
+                        snapshot.Path);
                     OverviewValueRow("采集时间", snapshot.CaptureTime);
                     OverviewValueRow("目标平台", snapshot.Platform);
                 }
-                GUILayout.Space(3);
+                GUILayout.Space(4f);
             }
 
-            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
-                GUILayout.Label("托管 (Managed)", EditorStyles.miniBoldLabel);
+                VumsEditorStyles.DrawSectionHeader("托管内存", "展示完整序列，并计算最后快照相对 A 的变化量。");
                 OverviewSeriesRow("托管对象总数", _snapshots.Select(item => (long)item.TotalObjects), false);
                 OverviewSeriesRow("泄漏 Managed Shell", _snapshots.Select(item => (long)item.Leaks.Count), false);
                 OverviewSeriesRow("重复字符串可避免内存", _snapshots.Select(item => item.DuplicateAvoidableBytes), true);
                 OverviewSeriesRow("Top50 大对象总大小", _snapshots.Select(item => item.Top50LargeObjectBytes), true);
             }
 
-            GUILayout.Space(4);
-            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            GUILayout.Space(VumsEditorStyles.SectionSpacing);
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
-                GUILayout.Label("原生 (Native)", EditorStyles.miniBoldLabel);
+                VumsEditorStyles.DrawSectionHeader("原生内存", "单位统一格式化显示，Δ 始终表示最终快照减去 A。");
                 MemorySeriesRow("总已用内存", item => item.TotalUsedMemory);
                 MemorySeriesRow("GC 堆已用", item => item.GcHeapUsedMemory);
                 MemorySeriesRow("GC 堆保留", item => item.GcHeapReservedMemory);
@@ -377,16 +404,24 @@ namespace VUMS.Editor
                 OverviewSeriesRow("真实内存占用", _snapshots.Select(item => (long)RealUsedMemory(item.MemoryStats)), true);
             }
 
-            GUILayout.Space(2);
-            EditorGUILayout.HelpBox(
-                $"Δ 表示快照 {_snapshots[_snapshots.Count - 1].Name} 相对基准 A 的变化量。真实内存占用 = 总已用内存 − Profiler 已用 − Memory Profiler 已用。",
-                MessageType.None);
+            GUILayout.Space(4f);
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.CompactCard))
+            {
+                GUILayout.Label(
+                    $"Δ 表示快照 {_snapshots[_snapshots.Count - 1].Name} 相对基准 A 的变化量。真实内存占用 = 总已用内存 − Profiler 已用 − Memory Profiler 已用。",
+                    VumsEditorStyles.SectionDescription);
+            }
         }
 
         private void DrawTypeDeltaTab()
         {
-            EditorGUILayout.LabelField(
-                $"共 {_typeDiffs.Count:N0} 个类型数量发生变化（按最终快照相对 A 的 |Δ| 降序，显示前 200）。");
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+            {
+                VumsEditorStyles.DrawSectionHeader(
+                    "类型数量增量",
+                    $"共 {_typeDiffs.Count:N0} 个类型数量发生变化；按最终快照相对 A 的 |Δ| 降序，最多显示 200 项。");
+            }
+            GUILayout.Space(4f);
             if (_typeDiffs.Count == 0)
             {
                 EditorGUILayout.HelpBox("所选快照之间没有类型数量变化。", MessageType.Info);
@@ -397,11 +432,14 @@ namespace VUMS.Editor
             for (var index = 0; index < shown; index++)
             {
                 var diff = _typeDiffs[index];
-                using (new EditorGUILayout.HorizontalScope())
+                using (new EditorGUILayout.HorizontalScope(VumsEditorStyles.CompactCard))
                 {
-                    EditorGUILayout.SelectableLabel(diff.TypeName, EditorStyles.label,
-                        GUILayout.Height(EditorGUIUtility.singleLineHeight), GUILayout.ExpandWidth(true));
-                    GUILayout.Label(BuildCountSeries(diff.Counts), GUILayout.Width(GetSeriesWidth()));
+                    EditorGUILayout.SelectableLabel(
+                        diff.TypeName,
+                        VumsEditorStyles.SelectableRow,
+                        GUILayout.Height(24f),
+                        GUILayout.ExpandWidth(true));
+                    GUILayout.Label(BuildCountSeries(diff.Counts), VumsEditorStyles.MetricValue, GUILayout.Width(GetSeriesWidth()));
                 }
             }
 
@@ -434,7 +472,7 @@ namespace VUMS.Editor
                     EditorStyles.miniLabel);
                 foreach (var group in delta.PathGroups)
                 {
-                    using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+                    using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
                     {
                         group.Expanded = EditorGUILayout.Foldout(
                             group.Expanded,
@@ -462,28 +500,26 @@ namespace VUMS.Editor
 
         private void DrawDuplicateStringTab()
         {
-            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+            {
+                VumsEditorStyles.DrawSectionHeader("重复字符串趋势", "对比各快照的可避免内存，并分别列出 Top 20。 ");
                 OverviewSeriesRow("重复字符串可避免内存", _snapshots.Select(item => item.DuplicateAvoidableBytes), true);
+            }
 
             foreach (var snapshot in _snapshots)
             {
-                GUILayout.Space(6);
-                EditorGUILayout.LabelField($"{snapshot.Name} 快照重复字符串 Top 20（按可避免内存排序）:", EditorStyles.boldLabel);
-                DrawDuplicateStringList(snapshot.DuplicateTop20);
+                GUILayout.Space(VumsEditorStyles.SectionSpacing);
+                using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+                {
+                    VumsEditorStyles.DrawSectionHeader($"快照 {snapshot.Name} · Top 20", "按可避免内存从高到低排列。");
+                    DrawDuplicateStringList(snapshot.DuplicateTop20);
+                }
             }
         }
 
-        private const float OverviewLabelWidth = 200f;
-        private const float OverviewValueSpacing = 24f;
-
         private static void OverviewValueRow(string label, string value)
         {
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                GUILayout.Label(label, GUILayout.Width(OverviewLabelWidth));
-                GUILayout.Space(OverviewValueSpacing);
-                GUILayout.Label(value, GUILayout.ExpandWidth(true));
-            }
+            VumsEditorStyles.DrawMetricRow(label, value, 220f);
         }
 
         private void OverviewSeriesRow(string label, IEnumerable<long> values, bool isBytes)
@@ -604,7 +640,7 @@ namespace VUMS.Editor
                 leakedObject.RetentionNodeExpanded[0] = true;
             }
 
-            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
                 for (var depth = 0; depth < nodes.Length; depth++)
                 {
