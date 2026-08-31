@@ -6,7 +6,9 @@ using System.Text;
 using UnityEditor;
 using UnityEngine;
 using UMS.Analysis;
+using UMS.Analysis.Structures;
 using UMS.Analysis.Structures.Objects;
+using UMS.LowLevel.Structures;
 
 namespace VUMS.Editor
 {
@@ -18,9 +20,34 @@ namespace VUMS.Editor
     public class ManagedMemoryLeakAnalysisWindow : EditorWindow
     {
         private string _snapPath = "";
-        private string _resultText = "请选择一个 .snap 快照文件，然后点击「分析」。";
+        private string _captureTimeText = "-";
+        private string _platformText = "-";
+        private const int LeakPageSize = 20;
+
+        // 概览指标（与 SnapshotDiff 概览保持一致，便于横向比对）
+        private long _duplicateAvoidableBytes;
+        private long _top50LargeObjectTotalBytes;
+        private ProfileTargetMemoryStats _nativeStats;
+        private bool _hasNativeStats;
+
+        private string _managedLeakResultText = "请选择一个 .snap 快照文件。";
+        private string _duplicateStringResultText = "请选择一个 .snap 快照文件。";
+        private readonly string[] _resultTabs = { "概览", "托管内存泄漏", "重复字符串", "大对象引用路径" };
         private Vector2 _scroll;
+        private int _selectedResultTab;
         private bool _analyzing;
+        private bool _hasManagedLeakResult;
+        private int _managedObjectCount;
+        private int _leakPage;
+        private readonly Dictionary<string, List<LeakedObjectInfo>> _leakedObjectsByType = new Dictionary<string, List<LeakedObjectInfo>>();
+        private readonly List<LeakedObjectInfo> _leakedObjects = new List<LeakedObjectInfo>();
+        private string[] _leakTypeOptions = Array.Empty<string>();
+        private List<string> _leakTypeNames = new List<string>();
+        private int _selectedLeakTypeIndex;
+        private readonly List<RetainedObjectInfo> _largeObjects = new List<RetainedObjectInfo>();
+        private string[] _largeObjectOptions = Array.Empty<string>();
+        private bool[] _retentionNodeExpanded = Array.Empty<bool>();
+        private int _selectedLargeObjectIndex;
 
         [MenuItem("VUMS/ManagedMemoryLeakAnalysis", false, 2)]
         public static void OpenWindow()
@@ -36,7 +63,7 @@ namespace VUMS.Editor
             // 只导出工具本身：UMS 库 DLL 与 Editor 窗口脚本，不带入任何依赖
             var folders = new[]
             {
-                "Assets/ThirdParty/UMS",
+                "Assets/ThirdParty/VUMS",
                 "Assets/Editor/VUMS",
             };
 
@@ -59,36 +86,359 @@ namespace VUMS.Editor
         {
             GUILayout.Label("Managed Memory Leak Analysis", EditorStyles.boldLabel);
 
-            // --- 选择文件 + 分析按钮 + 路径框（同一行）---
+            // --- 选择文件 + 路径框（选择后自动分析）---
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("选择 .snap 文件", GUILayout.Width(150)))
+            EditorGUI.BeginDisabledGroup(_analyzing);
+            if (GUILayout.Button(_analyzing ? "分析中..." : "选择 .snap 文件", GUILayout.Width(150)))
             {
                 string startDir = string.IsNullOrEmpty(_snapPath) ? "" : Path.GetDirectoryName(_snapPath);
                 string picked = EditorUtility.OpenFilePanel("选择内存快照文件", startDir, "snap");
                 if (!string.IsNullOrEmpty(picked))
-                    _snapPath = picked;
-            }
-
-            EditorGUI.BeginDisabledGroup(_analyzing || string.IsNullOrEmpty(_snapPath));
-            if (GUILayout.Button("分析", GUILayout.Width(80)))
-            {
-                if (!_analyzing)
                 {
-                    _analyzing = true;
-                    EditorApplication.delayCall += RunAnalysisOnce;
+                    _snapPath = picked;
+                    BeginAnalysis();
                 }
             }
             EditorGUI.EndDisabledGroup();
 
-            _snapPath = EditorGUILayout.TextField(_snapPath);
+            EditorGUI.BeginDisabledGroup(true);
+            EditorGUILayout.TextField(_snapPath);
+            EditorGUI.EndDisabledGroup();
             EditorGUILayout.EndHorizontal();
 
-            // --- 结果展示 ---
+            // --- 分析结果切页 ---
             GUILayout.Space(8);
-            GUILayout.Label("分析结果", EditorStyles.boldLabel);
+            _selectedResultTab = GUILayout.Toolbar(_selectedResultTab, _resultTabs);
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
-            EditorGUILayout.TextArea(_resultText, GUILayout.ExpandHeight(true));
+            switch (_selectedResultTab)
+            {
+                case 0:
+                    DrawOverviewTab();
+                    break;
+                case 1:
+                    DrawManagedLeakTab();
+                    break;
+                case 2:
+                    EditorGUILayout.TextArea(_duplicateStringResultText, GUILayout.ExpandHeight(true));
+                    break;
+                case 3:
+                    DrawLargeObjectRetentionTab();
+                    break;
+            }
             EditorGUILayout.EndScrollView();
+        }
+
+        private void DrawOverviewTab()
+        {
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                GUILayout.Label("快照信息", EditorStyles.miniBoldLabel);
+                OverviewValueRow("采集时间", _captureTimeText);
+                OverviewValueRow("目标平台", _platformText);
+            }
+
+            GUILayout.Space(4);
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                GUILayout.Label("托管 (Managed)", EditorStyles.miniBoldLabel);
+                OverviewValueRow("托管对象总数", $"{_managedObjectCount:N0}");
+                OverviewValueRow("泄漏 Managed Shell", $"{_leakedObjects.Count:N0}");
+                OverviewValueRow("重复字符串可避免内存", FormatBytes(_duplicateAvoidableBytes));
+                OverviewValueRow("Top50 大对象总大小", FormatBytes(_top50LargeObjectTotalBytes));
+            }
+
+            GUILayout.Space(4);
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                GUILayout.Label("原生 (Native)", EditorStyles.miniBoldLabel);
+                if (_hasNativeStats)
+                {
+                    OverviewValueRow("总已用内存", FormatBytes((long)_nativeStats.TotalUsedMemory));
+                    OverviewValueRow("GC 堆已用", FormatBytes((long)_nativeStats.GcHeapUsedMemory));
+                    OverviewValueRow("GC 堆保留", FormatBytes((long)_nativeStats.GcHeapReservedMemory));
+                    OverviewValueRow("图形 (Graphics)", FormatBytes((long)_nativeStats.GraphicsUsedMemory));
+                    OverviewValueRow("音频 (Audio)", FormatBytes((long)_nativeStats.AudioUsedMemory));
+                    OverviewValueRow("临时分配器 (Temp)", FormatBytes((long)_nativeStats.TempAllocatorUsedMemory));
+                    OverviewValueRow("Profiler 已用", FormatBytes((long)_nativeStats.ProfilerUsedMemory));
+                    OverviewValueRow("Memory Profiler 已用", FormatBytes((long)_nativeStats.MemoryProfilerUsedMemory));
+                    var realUsed = Math.Max(0L,
+                        (long)_nativeStats.TotalUsedMemory -
+                        (long)_nativeStats.ProfilerUsedMemory -
+                        (long)_nativeStats.MemoryProfilerUsedMemory);
+                    OverviewValueRow("真实内存占用", FormatBytes(realUsed));
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox(
+                        _hasManagedLeakResult
+                            ? "当前快照未提供原生内存统计。"
+                            : _managedLeakResultText,
+                        MessageType.Info);
+                }
+            }
+
+            if (_hasNativeStats)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.HelpBox(
+                    "真实内存占用 = 总已用内存 − Profiler 已用 − Memory Profiler 已用（剔除分析工具自身开销）。",
+                    MessageType.None);
+            }
+
+            if (_hasManagedLeakResult && !_hasNativeStats)
+            {
+                GUILayout.Space(4);
+                EditorGUILayout.HelpBox(
+                    "提示：泄漏 Shell 与重复字符串为排查线索，Top50 大对象/重复字符串越多通常意味着托管层压力越大。",
+                    MessageType.None);
+            }
+        }
+
+        // 概览用 key/value 行：label 固定宽度，value 占剩余，两者之间留出固定间距，
+        // 避免长 label 把 value 挤到第二行被截断。
+        private const float OverviewLabelWidth = 200f;
+        private const float OverviewValueSpacing = 24f;
+
+        private static void OverviewValueRow(string label, string value)
+        {
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.Label(label, GUILayout.Width(OverviewLabelWidth));
+                GUILayout.Space(OverviewValueSpacing);
+                GUILayout.Label(value, GUILayout.ExpandWidth(true));
+            }
+        }
+
+        private void DrawManagedLeakTab()
+        {
+            if (!_hasManagedLeakResult)
+            {
+                EditorGUILayout.HelpBox(_managedLeakResultText, MessageType.Info);
+                return;
+            }
+
+            EditorGUILayout.LabelField($"共发现 {_managedObjectCount:N0} 个托管对象。");
+            EditorGUILayout.LabelField($"检测完成，共 {_leakedObjects.Count:N0} 个泄漏的 Managed Shell。");
+
+            if (_leakedObjects.Count == 0)
+                return;
+
+            GUILayout.Space(6);
+            if (_leakTypeNames.Count == 0)
+                return;
+
+            EditorGUI.BeginChangeCheck();
+            _selectedLeakTypeIndex = EditorGUILayout.Popup(
+                "选择泄漏类型",
+                _selectedLeakTypeIndex,
+                _leakTypeOptions);
+            if (EditorGUI.EndChangeCheck())
+                _leakPage = 0;
+
+            var selectedType = _leakTypeNames[_selectedLeakTypeIndex];
+            var typeObjects = _leakedObjectsByType[selectedType];
+
+            GUILayout.Space(4);
+            var pageCount = Mathf.Max(1, Mathf.CeilToInt(typeObjects.Count / (float)LeakPageSize));
+            _leakPage = Mathf.Clamp(_leakPage, 0, pageCount - 1);
+            var startIndex = _leakPage * LeakPageSize;
+            var endIndex = Mathf.Min(startIndex + LeakPageSize, typeObjects.Count);
+
+            for (var index = startIndex; index < endIndex; index++)
+            {
+                var leakedObject = typeObjects[index];
+                using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+                {
+                    leakedObject.Expanded = EditorGUILayout.Foldout(
+                        leakedObject.Expanded,
+                        $"{leakedObject.TypeName} @ 0x{leakedObject.Address:X}",
+                        true);
+                    if (leakedObject.Expanded)
+                    {
+                        GUILayout.Space(3);
+                        DrawLeakedObjectRetentionNodes(leakedObject);
+                    }
+                }
+            }
+
+            if (typeObjects.Count > LeakPageSize)
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUI.BeginDisabledGroup(_leakPage <= 0);
+                    if (GUILayout.Button("上一页", GUILayout.Width(80)))
+                    {
+                        _leakPage--;
+                        _scroll = Vector2.zero;
+                    }
+                    EditorGUI.EndDisabledGroup();
+
+                    GUILayout.FlexibleSpace();
+                    GUILayout.Label($"第 {_leakPage + 1:N0} / {pageCount:N0} 页（每页 {LeakPageSize} 个）");
+                    GUILayout.FlexibleSpace();
+
+                    EditorGUI.BeginDisabledGroup(_leakPage >= pageCount - 1);
+                    if (GUILayout.Button("下一页", GUILayout.Width(80)))
+                    {
+                        _leakPage++;
+                        _scroll = Vector2.zero;
+                    }
+                    EditorGUI.EndDisabledGroup();
+                }
+            }
+        }
+
+        private void DrawLeakedObjectRetentionNodes(LeakedObjectInfo leakedObject)
+        {
+            var nodes = leakedObject.RetentionPathNodes;
+            if (nodes == null || nodes.Length == 0)
+            {
+                EditorGUILayout.HelpBox("(无)", MessageType.None);
+                return;
+            }
+
+            if (leakedObject.RetentionNodeExpanded == null ||
+                leakedObject.RetentionNodeExpanded.Length != nodes.Length)
+            {
+                leakedObject.RetentionNodeExpanded = new bool[nodes.Length];
+                leakedObject.RetentionNodeExpanded[0] = true;
+            }
+
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                for (var depth = 0; depth < nodes.Length; depth++)
+                {
+                    if (depth > 0 && !leakedObject.RetentionNodeExpanded[depth - 1])
+                        break;
+
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        GUILayout.Space(depth * 18f);
+                        var hasParentNode = depth < nodes.Length - 1;
+                        if (hasParentNode)
+                        {
+                            leakedObject.RetentionNodeExpanded[depth] = EditorGUILayout.Foldout(
+                                leakedObject.RetentionNodeExpanded[depth],
+                                nodes[depth],
+                                true);
+                        }
+                        else
+                        {
+                            GUILayout.Space(14f);
+                            GUILayout.Label(nodes[depth], EditorStyles.wordWrappedLabel);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void DrawLargeObjectRetentionTab()
+        {
+            if (_largeObjectOptions.Length == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    _analyzing ? "正在分析大对象引用路径..." : "请先选择一个 .snap 快照文件。",
+                    MessageType.Info);
+                return;
+            }
+
+            EditorGUI.BeginChangeCheck();
+            _selectedLargeObjectIndex = EditorGUILayout.Popup(
+                "选择对象",
+                _selectedLargeObjectIndex,
+                _largeObjectOptions);
+            if (EditorGUI.EndChangeCheck())
+                ResetRetentionTreeExpansion();
+
+            GUILayout.Space(4);
+            DrawRetentionTree(_largeObjects[_selectedLargeObjectIndex]);
+        }
+
+        private void DrawRetentionTree(RetainedObjectInfo retainedObject)
+        {
+            var nodes = retainedObject.RetentionPathNodes;
+            if (nodes == null || nodes.Length == 0)
+            {
+                EditorGUILayout.HelpBox("该对象没有可用的引用保留路径。", MessageType.Info);
+                return;
+            }
+
+            EnsureRetentionTreeExpansion(nodes.Length);
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                for (var depth = 0; depth < nodes.Length; depth++)
+                {
+                    if (depth > 0 && !_retentionNodeExpanded[depth - 1])
+                        break;
+
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        GUILayout.Space(depth * 18f);
+                        var hasParentNode = depth < nodes.Length - 1;
+                        if (hasParentNode)
+                        {
+                            _retentionNodeExpanded[depth] = EditorGUILayout.Foldout(
+                                _retentionNodeExpanded[depth],
+                                nodes[depth],
+                                true);
+                        }
+                        else
+                        {
+                            GUILayout.Space(14f);
+                            GUILayout.Label(nodes[depth], EditorStyles.wordWrappedLabel);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void EnsureRetentionTreeExpansion(int nodeCount)
+        {
+            if (_retentionNodeExpanded.Length == nodeCount)
+                return;
+
+            _retentionNodeExpanded = new bool[nodeCount];
+            if (nodeCount > 0)
+                _retentionNodeExpanded[0] = true;
+        }
+
+        private void ResetRetentionTreeExpansion()
+        {
+            var nodeCount = _largeObjects.Count == 0
+                ? 0
+                : _largeObjects[_selectedLargeObjectIndex].RetentionPathNodes.Length;
+            _retentionNodeExpanded = new bool[nodeCount];
+            if (nodeCount > 0)
+                _retentionNodeExpanded[0] = true;
+        }
+
+        private void BeginAnalysis()
+        {
+            if (_analyzing || string.IsNullOrEmpty(_snapPath))
+                return;
+
+            _analyzing = true;
+            _selectedResultTab = 0;
+            _scroll = Vector2.zero;
+            _leakPage = 0;
+            _hasManagedLeakResult = false;
+            _managedObjectCount = 0;
+            _leakedObjectsByType.Clear();
+            _leakedObjects.Clear();
+            _leakTypeNames.Clear();
+            _leakTypeOptions = Array.Empty<string>();
+            _selectedLeakTypeIndex = 0;
+            _managedLeakResultText = "正在分析托管内存泄漏...";
+            _duplicateStringResultText = "正在分析重复字符串...";
+            _duplicateAvoidableBytes = 0;
+            _top50LargeObjectTotalBytes = 0;
+            _nativeStats = default;
+            _hasNativeStats = false;
+            _captureTimeText = "-";
+            _platformText = "-";
+            EditorApplication.delayCall -= RunAnalysisOnce;
+            EditorApplication.delayCall += RunAnalysisOnce;
+            Repaint();
         }
 
         private void RunAnalysisOnce()
@@ -105,11 +455,67 @@ namespace VUMS.Editor
             Repaint();
         }
 
+        private sealed class LeakedObjectInfo
+        {
+            public string TypeName;
+            public ulong Address;
+            public string[] RetentionPathNodes;
+            public bool Expanded;
+            public bool[] RetentionNodeExpanded = Array.Empty<bool>();
+        }
+
+        private sealed class RetainedObjectInfo
+        {
+            public string TypeName;
+            public ulong Address;
+            public long SizeBytes;
+            public string[] RetentionPathNodes;
+        }
+
+        private sealed class DuplicateStringStat
+        {
+            public string Value;
+            public int Count;
+            public long TotalBytes;
+            public long SingleInstanceBytes;
+            public long DuplicateBytes => Math.Max(0, TotalBytes - SingleInstanceBytes);
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            const double kb = 1024.0;
+            const double mb = kb * 1024.0;
+            const double gb = mb * 1024.0;
+
+            if (bytes >= gb)
+                return $"{bytes / gb:F2} GB";
+            if (bytes >= mb)
+                return $"{bytes / mb:F2} MB";
+            if (bytes >= kb)
+                return $"{bytes / kb:F2} KB";
+            return $"{bytes} B";
+        }
+
+        private static string[] GetSafeRetentionPathNodes(SnapshotFile file, ManagedClassInstance instance)
+        {
+            try
+            {
+                return instance.GetFirstObservedRetentionPathNodes(file);
+            }
+            catch (Exception exception)
+            {
+                return new[] { $"保留路径解析失败: {exception.Message}" };
+            }
+        }
+
         private void Analyze()
         {
             if (string.IsNullOrEmpty(_snapPath) || !File.Exists(_snapPath))
             {
-                _resultText = "错误：文件路径为空或文件不存在。";
+                const string error = "错误：文件路径为空或文件不存在。";
+                _managedLeakResultText = error;
+                _duplicateStringResultText = error;
+                _analyzing = false;
                 Repaint();
                 return;
             }
@@ -119,34 +525,122 @@ namespace VUMS.Editor
 
             try
             {
-                var sb = new StringBuilder();
+                var duplicateStringSb = new StringBuilder();
                 var totalStart = DateTime.Now;
 
                 EditorUtility.DisplayProgressBar("分析中", "正在读取快照文件...", 0.1f);
                 using var file = new SnapshotFile(_snapPath);
 
-                sb.AppendLine($"快照格式版本 : {file.SnapshotFormatVersion} ({(int) file.SnapshotFormatVersion})");
-                sb.AppendLine($"采集时间     : {file.CaptureDateTime}");
-                sb.AppendLine($"目标平台     : {file.ProfileTargetInfo}");
-                sb.AppendLine($"采集时内存   : {file.ProfileTargetMemoryStats}");
-                sb.AppendLine();
+                _captureTimeText = file.CaptureDateTime.ToString();
+                _platformText = file.ProfileTargetInfo.ToString();
 
-                EditorUtility.DisplayProgressBar("分析中", "正在加载托管对象 (GC Roots)...", 0.4f);
-                file.LoadManagedObjectsFromGcRoots();
-                EditorUtility.DisplayProgressBar("分析中", "正在加载托管对象 (静态字段)...", 0.6f);
+                try
+                {
+                    _nativeStats = file.ProfileTargetMemoryStats;
+                    _hasNativeStats = true;
+                }
+                catch (Exception nativeException)
+                {
+                    _nativeStats = default;
+                    _hasNativeStats = false;
+                    Debug.LogWarning($"[VUMS] 读取原生内存信息失败: {nativeException.Message}");
+                }
+
+                // UMS 保存对象第一次被发现时的引用路径。先扫描静态字段，才能保留静态单例、
+                // 全局管理器、静态集合和静态事件等来源；随后再补充仅由 GC Root 发现的对象。
+                EditorUtility.DisplayProgressBar("分析中", "正在加载托管对象 (静态字段)...", 0.35f);
                 file.LoadManagedObjectsFromStaticFields();
+                EditorUtility.DisplayProgressBar("分析中", "正在加载托管对象 (GC Roots)...", 0.55f);
+                file.LoadManagedObjectsFromGcRoots();
 
                 var allObjects = file.AllManagedClassInstances.ToArray();
-                sb.AppendLine($"共发现 {allObjects.Length} 个托管对象。");
+                _managedObjectCount = allObjects.Length;
+
+                EditorUtility.DisplayProgressBar("分析中", "正在分析静态字段持有和大对象引用路径...", 0.68f);
+                var retainedObjects = new List<RetainedObjectInfo>();
+
+                foreach (var obj in allObjects)
+                {
+                    if (obj.ObjectAddress == 0)
+                        continue;
+
+                    var rawInfo = file.ParseManagedObjectInfo(obj.ObjectAddress);
+                    if (!rawInfo.IsKnownType || rawInfo.Size <= 0)
+                        continue;
+
+                    var retainedInfo = new RetainedObjectInfo
+                    {
+                        TypeName = file.GetTypeName(obj.TypeInfo.TypeIndex),
+                        Address = obj.ObjectAddress,
+                        SizeBytes = rawInfo.Size,
+                        RetentionPathNodes = GetSafeRetentionPathNodes(file, obj),
+                    };
+                    retainedObjects.Add(retainedInfo);
+                }
+
+                var selectedLargeObjects = retainedObjects
+                    .OrderByDescending(item => item.SizeBytes)
+                    .Take(50)
+                    .ToArray();
+                _largeObjects.Clear();
+                _largeObjects.AddRange(selectedLargeObjects);
+                _top50LargeObjectTotalBytes = selectedLargeObjects.Sum(item => item.SizeBytes);
+                _largeObjectOptions = selectedLargeObjects
+                    .Select(item => $"{FormatBytes(item.SizeBytes)} | {item.TypeName} @ 0x{item.Address:X}")
+                    .ToArray();
+                _selectedLargeObjectIndex = 0;
+                ResetRetentionTreeExpansion();
+
+                EditorUtility.DisplayProgressBar("分析中", "正在检测重复字符串...", 0.76f);
+                var duplicateStrings = new Dictionary<string, DuplicateStringStat>(StringComparer.Ordinal);
+                foreach (var managedString in file.AllManagedStrings)
+                {
+                    if (!duplicateStrings.TryGetValue(managedString.Value, out var stringStat))
+                    {
+                        stringStat = new DuplicateStringStat
+                        {
+                            Value = managedString.Value,
+                            SingleInstanceBytes = managedString.SizeBytes,
+                        };
+                        duplicateStrings.Add(managedString.Value, stringStat);
+                    }
+
+                    stringStat.Count++;
+                    stringStat.TotalBytes += managedString.SizeBytes;
+                }
+
+                var repeatedStrings = duplicateStrings.Values
+                    .Where(item => item.Count > 1)
+                    .OrderByDescending(item => item.DuplicateBytes)
+                    .Take(20)
+                    .ToArray();
+                duplicateStringSb.AppendLine("重复字符串检查 Top 20:");
+                if (repeatedStrings.Length == 0)
+                {
+                    duplicateStringSb.AppendLine("  未发现重复字符串实例。");
+                }
+                else
+                {
+                    foreach (var stringStat in repeatedStrings)
+                    {
+                        var preview = stringStat.Value
+                            .Replace("\r", "\\r")
+                            .Replace("\n", "\\n")
+                            .Replace("\t", "\\t");
+                        if (preview.Length > 100)
+                            preview = preview.Substring(0, 100) + "...";
+
+                        duplicateStringSb.AppendLine(
+                            $"  {stringStat.Count,6:N0} x | 总计 {FormatBytes(stringStat.TotalBytes),10} | \"{preview}\"");
+                    }
+                }
+                _duplicateAvoidableBytes = repeatedStrings.Sum(item => item.DuplicateBytes);
 
                 EditorUtility.DisplayProgressBar("分析中", "正在检测泄漏的 Managed Shell...", 0.85f);
                 var unityObjects = allObjects.Where(i => i.InheritsFromUnityEngineObject(file)).ToArray();
-                sb.AppendLine($"其中 {unityObjects.Length} 个继承自 UnityEngine.Object。");
-                sb.AppendLine();
 
-                int numLeaked = 0;
-                var leakedTypes = new Dictionary<string, int>();
-                var leakedLines = new List<string>();
+                _leakedObjectsByType.Clear();
+                _leakedObjects.Clear();
 
                 foreach (var obj in unityObjects)
                 {
@@ -154,37 +648,42 @@ namespace VUMS.Editor
                         continue;
 
                     var typeName = file.GetTypeName(obj.TypeInfo.TypeIndex);
-                    leakedLines.Add($"  泄漏对象类型 : {typeName} @ 0x{obj.ObjectAddress:X}");
-                    leakedLines.Add($"    保留路径   : {obj.GetFirstObservedRetentionPath(file)}");
+                    var leakedObject = new LeakedObjectInfo
+                    {
+                        TypeName = typeName,
+                        Address = obj.ObjectAddress,
+                        RetentionPathNodes = GetSafeRetentionPathNodes(file, obj),
+                    };
+                    _leakedObjects.Add(leakedObject);
 
-                    leakedTypes.TryGetValue(typeName, out var count);
-                    leakedTypes[typeName] = count + 1;
-                    numLeaked++;
+                    if (!_leakedObjectsByType.TryGetValue(typeName, out var list))
+                    {
+                        list = new List<LeakedObjectInfo>();
+                        _leakedObjectsByType.Add(typeName, list);
+                    }
+                    list.Add(leakedObject);
                 }
 
-                sb.AppendLine($"检测完成，共 {numLeaked} 个泄漏的 Managed Shell。");
-                sb.AppendLine();
-                if (numLeaked > 0)
-                {
-                    sb.AppendLine("按类型统计:");
-                    foreach (var kvp in leakedTypes.OrderByDescending(k => k.Value))
-                        sb.AppendLine($"  {kvp.Value} x {kvp.Key}");
-                    sb.AppendLine();
-                }
-                sb.AppendLine($"总耗时: {(DateTime.Now - totalStart).TotalMilliseconds:F0} ms");
+                var orderedLeakTypes = _leakedObjectsByType
+                    .OrderByDescending(kvp => kvp.Value.Count)
+                    .ThenBy(kvp => kvp.Key, StringComparer.Ordinal)
+                    .ToList();
+                _leakTypeNames = orderedLeakTypes.Select(kvp => kvp.Key).ToList();
+                _leakTypeOptions = orderedLeakTypes
+                    .Select(kvp => $"{kvp.Value.Count,6:N0} x | {kvp.Key}")
+                    .ToArray();
 
-                if (numLeaked > 0)
-                {
-                    sb.AppendLine();
-                    sb.AppendLine("泄漏详情:");
-                    sb.AppendLine(string.Join("\n", leakedLines));
-                }
-
-                _resultText = sb.ToString();
+                _leakPage = 0;
+                _selectedLeakTypeIndex = 0;
+                _hasManagedLeakResult = true;
+                _managedLeakResultText = "";
+                _duplicateStringResultText = duplicateStringSb.ToString();
             }
             catch (Exception e)
             {
-                _resultText = $"分析过程中发生错误:\n{e.GetType().Name}: {e.Message}\n\n{e.StackTrace}";
+                var error = $"分析过程中发生错误:\n{e.GetType().Name}: {e.Message}\n\n{e.StackTrace}";
+                _managedLeakResultText = error;
+                _duplicateStringResultText = error;
                 Debug.LogError($"[VUMS] ManagedMemoryLeakAnalysis 分析失败: {e}");
             }
             finally
