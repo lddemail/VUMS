@@ -109,6 +109,46 @@ namespace VUMS.Editor
             }
         }
 
+        /// <summary>
+        /// 绘制一行内容，并支持在该行上右键弹出菜单。
+        /// drawContent 内部使用普通 GUILayout 即可；本方法会预留行高、拦截右键
+        /// ContextClick 事件，弹出含 “Copy” 的上下文菜单，点击 Copy 才把整行文本
+        /// 写入剪贴板，并通过窗口 ShowNotification 给出“已复制”反馈。
+        /// </summary>
+        internal static void CopyableRow(EditorWindow window, float height, string copyText, Action drawContent)
+        {
+            EnsureInitialized();
+            if (drawContent == null)
+                return;
+
+            // 没有可复制文本时直接绘制，避免无意义的交互区域。
+            if (string.IsNullOrEmpty(copyText))
+            {
+                drawContent();
+                return;
+            }
+
+            var rect = EditorGUILayout.GetControlRect(false, height, GUILayout.ExpandWidth(true));
+            if (Event.current.type == EventType.ContextClick && rect.Contains(Event.current.mousePosition))
+            {
+                Event.current.Use();
+                var menu = new GenericMenu();
+                menu.AddItem(
+                    new GUIContent("Copy"),
+                    false,
+                    () =>
+                    {
+                        EditorGUIUtility.systemCopyBuffer = copyText;
+                        window?.ShowNotification(new GUIContent("已复制行内容"));
+                    });
+                menu.ShowAsContext();
+            }
+
+            // 把内容拉回到刚预留出的行区域内，使其正好覆盖整行。
+            GUILayout.Space(-height);
+            drawContent();
+        }
+
         internal static void DrawStatus(string text, MessageType type)
         {
             EnsureInitialized();

@@ -230,7 +230,7 @@ namespace VUMS.Editor
             {
                 VumsEditorStyles.DrawSectionHeader(
                     "Unity Objects 优化建议",
-                    "仅显示存在疑似重复资源或重点单体资源（Native Size ≥ 2 MB）的类型。结果用于提供排查线索，不等同于实际可释放内存；Graphics Size 不包含在单对象 Native Size 中。");
+                    "仅显示存在疑似重复资源或重点单体资源。结果用于提供排查线索，不等同于实际可释放内存");
 
                 var recommendationTypeCount = _nativeTypeStats.Count(stat =>
                     _duplicateNativeResources.Any(item => string.Equals(item.TypeName, stat.TypeName, StringComparison.Ordinal)) ||
@@ -295,9 +295,15 @@ namespace VUMS.Editor
                                             {
                                                 foreach (var duplicate in duplicates)
                                                 {
-                                                    EditorGUILayout.SelectableLabel(
-                                                        $"{duplicate.Name} | {duplicate.Count:N0} 个 × {FormatBytes(duplicate.SingleSize)} | 合计 {FormatBytes(duplicate.TotalSize)} | 疑似额外 {FormatBytes(duplicate.PotentialDuplicateSize)}",
-                                                        GUILayout.Height(EditorGUIUtility.singleLineHeight));
+                                                    var duplicateText =
+                                                        $"{duplicate.Name} | {duplicate.Count:N0} 个 × {FormatBytes(duplicate.SingleSize)} | 合计 {FormatBytes(duplicate.TotalSize)} | 疑似额外 {FormatBytes(duplicate.PotentialDuplicateSize)}";
+                                                    VumsEditorStyles.CopyableRow(
+                                                        this,
+                                                        EditorGUIUtility.singleLineHeight,
+                                                        duplicateText,
+                                                        () => EditorGUILayout.SelectableLabel(
+                                                            duplicateText,
+                                                            GUILayout.Height(EditorGUIUtility.singleLineHeight)));
                                                 }
                                             }
                                         }
@@ -322,9 +328,15 @@ namespace VUMS.Editor
                                             {
                                                 foreach (var item in largeObjects)
                                                 {
-                                                    EditorGUILayout.SelectableLabel(
-                                                        $"{FormatBytes(item.NativeSize),10} | {item.Name} | Instance ID {item.InstanceId}",
-                                                        GUILayout.Height(EditorGUIUtility.singleLineHeight));
+                                                    var largeText =
+                                                        $"{FormatBytes(item.NativeSize),10} | {item.Name} | Instance ID {item.InstanceId}";
+                                                    VumsEditorStyles.CopyableRow(
+                                                        this,
+                                                        EditorGUIUtility.singleLineHeight,
+                                                        largeText,
+                                                        () => EditorGUILayout.SelectableLabel(
+                                                            largeText,
+                                                            GUILayout.Height(EditorGUIUtility.singleLineHeight)));
                                                 }
                                             }
                                         }
@@ -381,12 +393,18 @@ namespace VUMS.Editor
             for (var index = startIndex; index < endIndex; index++)
             {
                 var leakedObject = _leakedObjects[index];
+                var objectHeaderText = $"{leakedObject.TypeName} @ 0x{leakedObject.Address:X}";
                 using (new EditorGUILayout.VerticalScope(VumsEditorStyles.CompactCard))
                 {
-                    leakedObject.Expanded = EditorGUILayout.Foldout(
-                        leakedObject.Expanded,
-                        $"{leakedObject.TypeName} @ 0x{leakedObject.Address:X}",
-                        true);
+                    VumsEditorStyles.CopyableRow(
+                        this,
+                        EditorGUIUtility.singleLineHeight + 8f,
+                        objectHeaderText,
+                        () =>
+                        {
+                            leakedObject.Expanded = EditorGUILayout.Foldout(
+                                leakedObject.Expanded, objectHeaderText, true);
+                        });
                     if (leakedObject.Expanded)
                     {
                         GUILayout.Space(3);
@@ -432,13 +450,19 @@ namespace VUMS.Editor
             {
                 using (new EditorGUILayout.VerticalScope(VumsEditorStyles.CompactCard))
                 {
-                    var expanded = _expandedLeakGroupKeys.Contains(group.Key);
-                    expanded = EditorGUILayout.Foldout(
-                        expanded,
-                        $"{group.Objects.Count:N0} 个（{group.Objects.Count * 100f / objects.Count:F1}%） | {GetRootSummary(group.Representative.RetentionPathNodes)}",
-                        true);
-                    SetGroupState(_expandedLeakGroupKeys, group.Key, expanded);
-                    if (!expanded)
+                    var groupHeaderText =
+                        $"{group.Objects.Count:N0} 个（{group.Objects.Count * 100f / objects.Count:F1}%） | {GetRootSummary(group.Representative.RetentionPathNodes)}";
+                    VumsEditorStyles.CopyableRow(
+                        this,
+                        EditorGUIUtility.singleLineHeight + 8f,
+                        groupHeaderText,
+                        () =>
+                        {
+                            var expanded = _expandedLeakGroupKeys.Contains(group.Key);
+                            expanded = EditorGUILayout.Foldout(expanded, groupHeaderText, true);
+                            SetGroupState(_expandedLeakGroupKeys, group.Key, expanded);
+                        });
+                    if (!_expandedLeakGroupKeys.Contains(group.Key))
                         continue;
 
                     DrawLeakedObjectRetentionNodes(group.Representative);
@@ -453,9 +477,16 @@ namespace VUMS.Editor
                         continue;
 
                     foreach (var item in group.Objects.Take(10))
-                        EditorGUILayout.SelectableLabel(
-                            $"{item.TypeName} @ 0x{item.Address:X}",
-                            GUILayout.Height(EditorGUIUtility.singleLineHeight));
+                    {
+                        var objectText = $"{item.TypeName} @ 0x{item.Address:X}";
+                        VumsEditorStyles.CopyableRow(
+                            this,
+                            EditorGUIUtility.singleLineHeight,
+                            objectText,
+                            () => EditorGUILayout.SelectableLabel(
+                                objectText,
+                                GUILayout.Height(EditorGUIUtility.singleLineHeight)));
+                    }
                 }
             }
         }
@@ -537,23 +568,31 @@ namespace VUMS.Editor
                     if (depth > 0 && !leakedObject.RetentionNodeExpanded[depth - 1])
                         break;
 
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        GUILayout.Space(depth * 18f);
-                        var hasParentNode = depth < nodes.Length - 1;
-                        if (hasParentNode)
+                    var nodeText = nodes[depth];
+                    VumsEditorStyles.CopyableRow(
+                        this,
+                        EditorGUIUtility.singleLineHeight,
+                        nodeText,
+                        () =>
                         {
-                            leakedObject.RetentionNodeExpanded[depth] = EditorGUILayout.Foldout(
-                                leakedObject.RetentionNodeExpanded[depth],
-                                nodes[depth],
-                                true);
-                        }
-                        else
-                        {
-                            GUILayout.Space(14f);
-                            GUILayout.Label(nodes[depth], EditorStyles.wordWrappedLabel);
-                        }
-                    }
+                            using (new EditorGUILayout.HorizontalScope())
+                            {
+                                GUILayout.Space(depth * 18f);
+                                var hasParentNode = depth < nodes.Length - 1;
+                                if (hasParentNode)
+                                {
+                                    leakedObject.RetentionNodeExpanded[depth] = EditorGUILayout.Foldout(
+                                        leakedObject.RetentionNodeExpanded[depth],
+                                        nodeText,
+                                        true);
+                                }
+                                else
+                                {
+                                    GUILayout.Space(14f);
+                                    GUILayout.Label(nodeText, EditorStyles.wordWrappedLabel);
+                                }
+                            }
+                        });
                 }
             }
         }
@@ -603,23 +642,31 @@ namespace VUMS.Editor
                     if (depth > 0 && !_retentionNodeExpanded[depth - 1])
                         break;
 
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        GUILayout.Space(depth * 18f);
-                        var hasParentNode = depth < nodes.Length - 1;
-                        if (hasParentNode)
+                    var nodeText = nodes[depth];
+                    VumsEditorStyles.CopyableRow(
+                        this,
+                        EditorGUIUtility.singleLineHeight,
+                        nodeText,
+                        () =>
                         {
-                            _retentionNodeExpanded[depth] = EditorGUILayout.Foldout(
-                                _retentionNodeExpanded[depth],
-                                nodes[depth],
-                                true);
-                        }
-                        else
-                        {
-                            GUILayout.Space(14f);
-                            GUILayout.Label(nodes[depth], EditorStyles.wordWrappedLabel);
-                        }
-                    }
+                            using (new EditorGUILayout.HorizontalScope())
+                            {
+                                GUILayout.Space(depth * 18f);
+                                var hasParentNode = depth < nodes.Length - 1;
+                                if (hasParentNode)
+                                {
+                                    _retentionNodeExpanded[depth] = EditorGUILayout.Foldout(
+                                        _retentionNodeExpanded[depth],
+                                        nodeText,
+                                        true);
+                                }
+                                else
+                                {
+                                    GUILayout.Space(14f);
+                                    GUILayout.Label(nodeText, EditorStyles.wordWrappedLabel);
+                                }
+                            }
+                        });
                 }
             }
         }
