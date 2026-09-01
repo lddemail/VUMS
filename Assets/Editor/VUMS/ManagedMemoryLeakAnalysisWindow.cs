@@ -193,7 +193,6 @@ namespace VUMS.Editor
                     OverviewValueRow("GC 堆保留", FormatBytes((long)_nativeStats.GcHeapReservedMemory));
                     OverviewValueRow("图形 (Graphics)", FormatBytes((long)_nativeStats.GraphicsUsedMemory));
                     OverviewValueRow("音频 (Audio)", FormatBytes((long)_nativeStats.AudioUsedMemory));
-                    OverviewValueRow("临时分配器 (Temp)", FormatBytes((long)_nativeStats.TempAllocatorUsedMemory));
                     OverviewValueRow("Profiler 已用", FormatBytes((long)_nativeStats.ProfilerUsedMemory));
                     OverviewValueRow("Memory Profiler 已用", FormatBytes((long)_nativeStats.MemoryProfilerUsedMemory));
                     VumsEditorStyles.DrawDivider();
@@ -205,6 +204,10 @@ namespace VUMS.Editor
                     GUILayout.Space(4f);
                     GUILayout.Label(
                         "计算口径：总已用内存 − Profiler 已用 − Memory Profiler 已用。该值用于剔除分析器开销，不等同于 OS 级 RSS/PSS。",
+                        VumsEditorStyles.SectionDescription);
+                    GUILayout.Space(2f);
+                    GUILayout.Label(
+                        "GC 堆已用 = 当前 Mono/IL2CPP GC 堆实际占用；GC 堆保留 = Unity已经向系统申请并保留下来的堆容量。",
                         VumsEditorStyles.SectionDescription);
                 }
                 else
@@ -466,27 +469,6 @@ namespace VUMS.Editor
                         continue;
 
                     DrawLeakedObjectRetentionNodes(group.Representative);
-                    GUILayout.Space(3);
-                    var showObjects = _showLeakGroupObjectKeys.Contains(group.Key);
-                    showObjects = EditorGUILayout.Foldout(
-                        showObjects,
-                        $"代表对象与地址（显示前 {Math.Min(10, group.Objects.Count):N0} 个）",
-                        true);
-                    SetGroupState(_showLeakGroupObjectKeys, group.Key, showObjects);
-                    if (!showObjects)
-                        continue;
-
-                    foreach (var item in group.Objects.Take(10))
-                    {
-                        var objectText = $"{item.TypeName} @ 0x{item.Address:X}";
-                        VumsEditorStyles.CopyableRow(
-                            this,
-                            EditorGUIUtility.singleLineHeight,
-                            objectText,
-                            () => EditorGUILayout.SelectableLabel(
-                                objectText,
-                                GUILayout.Height(EditorGUIUtility.singleLineHeight)));
-                    }
                 }
             }
         }

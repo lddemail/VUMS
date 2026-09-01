@@ -133,21 +133,19 @@ namespace VUMS.Editor
             var selectedCount = GetSelectedCount();
             using (new EditorGUILayout.HorizontalScope())
             {
-                GUILayout.Label(
-                    selectedCount < 2
-                        ? "至少选择 A 和 B 后才能分析"
-                        : $"已选择 {selectedCount} 个快照，Δ = {SnapshotNames[selectedCount - 1]} − A",
-                    VumsEditorStyles.MutedLabel);
                 GUILayout.FlexibleSpace();
-
                 EditorGUI.BeginDisabledGroup(_diffing || selectedCount < 2);
                 if (GUILayout.Button(
                         _diffing ? "正在分析..." : $"开始分析 {selectedCount} 个快照",
                         VumsEditorStyles.PrimaryButton,
-                        GUILayout.Width(180f)))
+                        GUILayout.Width(220f),
+                        GUILayout.Height(32f)))
                     BeginAnalysis();
                 EditorGUI.EndDisabledGroup();
+                GUILayout.FlexibleSpace();
             }
+
+            GUILayout.Space(2f);
         }
 
         private string GetStartDirectory(int index)
@@ -398,7 +396,6 @@ namespace VUMS.Editor
                 MemorySeriesRow("GC 堆保留", item => item.GcHeapReservedMemory);
                 MemorySeriesRow("图形 (Graphics)", item => item.GraphicsUsedMemory);
                 MemorySeriesRow("音频 (Audio)", item => item.AudioUsedMemory);
-                MemorySeriesRow("临时分配器 (Temp)", item => item.TempAllocatorUsedMemory);
                 MemorySeriesRow("Profiler 已用", item => item.ProfilerUsedMemory);
                 MemorySeriesRow("Memory Profiler 已用", item => item.MemoryProfilerUsedMemory);
                 OverviewSeriesRow("真实内存占用", _snapshots.Select(item => (long)RealUsedMemory(item.MemoryStats)), true);
@@ -409,6 +406,10 @@ namespace VUMS.Editor
             {
                 GUILayout.Label(
                     $"Δ 表示快照 {_snapshots[_snapshots.Count - 1].Name} 相对基准 A 的变化量。真实内存占用 = 总已用内存 − Profiler 已用 − Memory Profiler 已用。",
+                    VumsEditorStyles.SectionDescription);
+                GUILayout.Space(2f);
+                GUILayout.Label(
+                    "GC 堆已用 = 当前 Mono/IL2CPP GC 堆实际占用；GC 堆保留 = Unity已经向系统申请并保留下来的堆容量。",
                     VumsEditorStyles.SectionDescription);
             }
         }
@@ -491,24 +492,6 @@ namespace VUMS.Editor
                             continue;
 
                         DrawLeakedObjectRetentionNodes(this, group.Representative);
-                        group.ShowObjects = EditorGUILayout.Foldout(
-                            group.ShowObjects,
-                            $"代表对象与地址（显示前 {Math.Min(10, group.Objects.Count):N0} 个）",
-                            true);
-                        if (!group.ShowObjects)
-                            continue;
-
-                        foreach (var item in group.Objects.Take(10))
-                        {
-                            var objectText = $"{item.TypeName} @ 0x{item.Address:X}";
-                            VumsEditorStyles.CopyableRow(
-                                this,
-                                EditorGUIUtility.singleLineHeight,
-                                objectText,
-                                () => EditorGUILayout.SelectableLabel(
-                                    objectText,
-                                    GUILayout.Height(EditorGUIUtility.singleLineHeight)));
-                        }
                     }
                 }
             }
@@ -830,7 +813,6 @@ namespace VUMS.Editor
             public LeakedObjectInfo Representative;
             public List<LeakedObjectInfo> Objects;
             public bool Expanded;
-            public bool ShowObjects;
         }
 
         private sealed class DuplicateStringStat
