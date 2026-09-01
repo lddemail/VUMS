@@ -37,7 +37,9 @@ namespace VUMS.Editor
         public static void OpenWindow()
         {
             var window = GetWindow<SnapshotDiffWindow>(true, "Snapshot Diff", true);
-            window.minSize = new Vector2(760, 620);
+            // 需要容纳“类型名 + 新增/消失标记 + A→E 序列 + 趋势列 + 迷你柱状图”，
+            // 宽度不足时趋势列会自动降级为纯文字，故这里给出能完整展示的默认宽度。
+            window.minSize = new Vector2(1000, 620);
             window.Show();
         }
 
@@ -322,8 +324,28 @@ namespace VUMS.Editor
             }
 
             _typeDiffs.Sort((x, y) =>
-                Math.Abs(y.Counts[y.Counts.Length - 1] - y.Counts[0])
-                    .CompareTo(Math.Abs(x.Counts[x.Counts.Length - 1] - x.Counts[0])));
+            {
+                // 组内顺序：持续升 > 新增 > 其他，组间按最终快照相对 A 的 |Δ| 降序。
+                // “持续升”表示中间没有任何一次回落，是最典型的只增不减泄漏特征，
+                // 因此优先于仅在首尾比较上看起来变多的类型。
+                var xRank = GetTypeOrderRank(x.Counts);
+                var yRank = GetTypeOrderRank(y.Counts);
+                if (xRank != yRank)
+                    return xRank.CompareTo(yRank);
+
+                return Math.Abs(y.Counts[y.Counts.Length - 1] - y.Counts[0])
+                    .CompareTo(Math.Abs(x.Counts[x.Counts.Length - 1] - x.Counts[0]));
+            });
+        }
+
+        /// <summary>类型增量列表的分组优先级，数值越小越靠前。</summary>
+        private static int GetTypeOrderRank(int[] counts)
+        {
+            if (ClassifyTrend(ToLongSeries(counts)) == TrendShape.Rising)
+                return 0;
+            if (IsNewType(counts))
+                return 1;
+            return 2;
         }
 
         private void BuildLeakDeltas()
@@ -416,11 +438,28 @@ namespace VUMS.Editor
 
         private void DrawTypeDeltaTab()
         {
+            var newTypeCount = _typeDiffs.Count(item => IsNewType(item.Counts));
+            var removedTypeCount = _typeDiffs.Count(item => IsRemovedType(item.Counts));
+            var risingCount = _typeDiffs.Count(item => ClassifyTrend(ToLongSeries(item.Counts)) == TrendShape.Rising);
+
             using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
-                VumsEditorStyles.DrawSectionHeader(
-                    "类型数量增量",
-                    $"共 {_typeDiffs.Count:N0} 个类型数量发生变化；按最终快照相对 A 的 |Δ| 降序，最多显示 200 项。");
+                VumsEditorStyles.DrawSectionHeader("类型数量增量",
+                    $"共 {_typeDiffs.Count:N0} 个类型数量发生变化；最多显示 200 项。");
+
+                // 排序优先级：持续升 > 新增 > 其他，同组内按 |Δ| 降序。
+                var orderText = risingCount > 0
+                    ? $"其中“持续升” {risingCount:N0} 个（中途无回落）已排在最前，其次为新增类型；同组内按 |Δ| 降序。"
+                    : "按最终快照相对 A 的 |Δ| 降序。";
+                GUILayout.Label(orderText, VumsEditorStyles.SectionDescription);
+                if (newTypeCount > 0)
+                    GUILayout.Label($"新增类型 {newTypeCount:N0} 个（A 中不存在、最终快照中出现）。",
+                        VumsEditorStyles.SectionDescription);
+                if (removedTypeCount > 0)
+                    GUILayout.Label($"已消失类型 {removedTypeCount:N0} 个（A 中存在、最终快照归零）。",
+                        VumsEditorStyles.SectionDescription);
+                GUILayout.Label("趋势列：持续升 / 持续降 / 升后降 / 波动 / 平稳，右侧为 A→E 迷你柱状图。",
+                    VumsEditorStyles.SectionDescription);
             }
             GUILayout.Space(4f);
             if (_typeDiffs.Count == 0)
@@ -429,11 +468,18 @@ namespace VUMS.Editor
                 return;
             }
 
+            var seriesWidth = GetSeriesWidth();
+            var showSparkline = CanShowSparkline(
+                TypeTagWidth + seriesWidth + TrendLabelWidth + SparklineWidth, 260f);
+
             var shown = Math.Min(200, _typeDiffs.Count);
             for (var index = 0; index < shown; index++)
             {
                 var diff = _typeDiffs[index];
-                var rowText = $"{diff.TypeName}  {BuildCountSeries(diff.Counts)}";
+                var tag = GetTypeTag(diff.Counts);
+                var rowText = string.IsNullOrEmpty(tag)
+                    ? $"{diff.TypeName}  {BuildCountSeries(diff.Counts)}"
+                    : $"[{tag}] {diff.TypeName}  {BuildCountSeries(diff.Counts)}";
                 VumsEditorStyles.CopyableRow(this, 32f, rowText, () =>
                 {
                     using (new EditorGUILayout.HorizontalScope(VumsEditorStyles.CompactCard))
@@ -443,7 +489,18 @@ namespace VUMS.Editor
                             VumsEditorStyles.SelectableRow,
                             GUILayout.Height(24f),
                             GUILayout.ExpandWidth(true));
-                        GUILayout.Label(BuildCountSeries(diff.Counts), VumsEditorStyles.MetricValue, GUILayout.Width(GetSeriesWidth()));
+                        GUILayout.Label(
+                            tag,
+                            VumsEditorStyles.MutedLabel,
+                            GUILayout.Width(TypeTagWidth));
+                        GUILayout.Label(
+                            BuildCountSeries(diff.Counts),
+                            VumsEditorStyles.MetricValue,
+                            GUILayout.Width(seriesWidth));
+                        DrawTrendShape(
+                            ToLongSeries(diff.Counts),
+                            EditorGUIUtility.singleLineHeight + 6f,
+                            showSparkline);
                     }
                 });
             }
@@ -462,6 +519,7 @@ namespace VUMS.Editor
             }
 
             EditorGUILayout.LabelField($"共 {_leakDeltas.Count:N0} 个类型在快照 {lastName} 相对 A 的泄漏数量增加。");
+            var showLeakSparkline = CanShowSparkline(TrendLabelWidth + SparklineWidth, 420f);
             foreach (var delta in _leakDeltas)
             {
                 var finalDelta = delta.Counts[delta.Counts.Length - 1] - delta.Counts[0];
@@ -472,7 +530,14 @@ namespace VUMS.Editor
                     leakHeaderText,
                     () =>
                     {
-                        delta.Expanded = EditorGUILayout.Foldout(delta.Expanded, leakHeaderText, true);
+                        using (new EditorGUILayout.HorizontalScope())
+                        {
+                            delta.Expanded = EditorGUILayout.Foldout(delta.Expanded, leakHeaderText, true);
+                            DrawTrendShape(
+                                ToLongSeries(delta.Counts),
+                                EditorGUIUtility.singleLineHeight + 4f,
+                                showLeakSparkline);
+                        }
                     });
                 if (!delta.Expanded)
                     continue;
@@ -533,7 +598,26 @@ namespace VUMS.Editor
 
             var delta = array[array.Length - 1] - array[0];
             var deltaText = isBytes ? FormatBytes(delta) : delta.ToString("N0");
-            OverviewValueRow(label, $"{string.Join("    ", parts)}    Δ: {(delta > 0 ? "+" : "")}{deltaText}");
+            var seriesText = $"{string.Join("    ", parts)}    Δ: {(delta > 0 ? "+" : "")}{deltaText}";
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.Label(label, VumsEditorStyles.MetricLabel, GUILayout.Width(220f));
+                GUILayout.Space(20f);
+                GUILayout.Label(seriesText, VumsEditorStyles.MetricValue, GUILayout.ExpandWidth(true));
+                DrawTrendShape(array, EditorGUIUtility.singleLineHeight + 6f,
+                    CanShowSparkline(220f + 20f + TrendLabelWidth + SparklineWidth, 430f));
+            }
+        }
+
+        /// <summary>
+        /// 判断当前窗口宽度是否还容得下迷你柱状图。reservedFixed 是同行已占用的固定宽度，
+        /// minBodyWidth 是仍需留给类型名/序列文本的最小宽度。空间不足时自动降级为纯文字标签，
+        /// 保证形状结论仍在，但不会把长类型名挤没。
+        /// </summary>
+        private bool CanShowSparkline(float reservedFixed, float minBodyWidth)
+        {
+            return position.width - reservedFixed >= minBodyWidth;
         }
 
         private void MemorySeriesRow(string label, Func<ProfileTargetMemoryStats, ulong> selector)
@@ -543,7 +627,9 @@ namespace VUMS.Editor
 
         private float GetSeriesWidth()
         {
-            return Mathf.Max(260f, _snapshots.Count * 105f + 80f);
+            // 每快照按 92px 估算（形如 "A:12,345"），比原先的 105px 更紧凑，
+            // 为新增的“新增/消失”标记与趋势列留出空间。
+            return Mathf.Max(260f, _snapshots.Count * 92f + 80f);
         }
 
         private string BuildCountSeries(int[] counts)
@@ -553,6 +639,195 @@ namespace VUMS.Editor
                 parts[index] = $"{_snapshots[index].Name}:{counts[index]:N0}";
             var delta = counts[counts.Length - 1] - counts[0];
             return $"{string.Join("  ", parts)}  Δ:{(delta > 0 ? "+" : "")}{delta:N0}";
+        }
+
+        // ---------- 趋势形状（A→E 序列的形状判定与迷你柱状图）----------
+
+        private const float SparklineWidth = 56f;
+        private const float TrendLabelWidth = 48f;
+        private const float TypeTagWidth = 36f;
+
+        private enum TrendShape
+        {
+            /// <summary>每步都在上升，疑似真泄漏。</summary>
+            Rising,
+
+            /// <summary>每步都在下降。</summary>
+            Falling,
+
+            /// <summary>中途到过峰值后明显回落，通常只是尚未回收或已释放。</summary>
+            Peaked,
+
+            /// <summary>有升有降，无稳定方向。</summary>
+            Volatile,
+
+            /// <summary>首尾接近，基本平稳。</summary>
+            Flat,
+        }
+
+        /// <summary>基准快照中不存在、最终快照中出现的类型。</summary>
+        private static bool IsNewType(int[] counts)
+        {
+            return counts != null && counts.Length > 1 && counts[0] == 0 &&
+                   counts[counts.Length - 1] > 0;
+        }
+
+        /// <summary>基准快照中存在、最终快照中已归零的类型。</summary>
+        private static bool IsRemovedType(int[] counts)
+        {
+            return counts != null && counts.Length > 1 && counts[0] > 0 &&
+                   counts[counts.Length - 1] == 0;
+        }
+
+        private static string GetTypeTag(int[] counts)
+        {
+            if (IsNewType(counts))
+                return "新增";
+            if (IsRemovedType(counts))
+                return "消失";
+            return string.Empty;
+        }
+
+        private static TrendShape ClassifyTrend(long[] values)
+        {
+            if (values == null || values.Length < 2)
+                return TrendShape.Flat;
+
+            var first = values[0];
+            var last = values[values.Length - 1];
+
+            var max = values[0];
+            var peakIndex = 0;
+            for (var index = 1; index < values.Length; index++)
+            {
+                if (values[index] <= max)
+                    continue;
+                max = values[index];
+                peakIndex = index;
+            }
+
+            var risingSteps = 0;
+            var fallingSteps = 0;
+            for (var index = 1; index < values.Length; index++)
+            {
+                if (values[index] > values[index - 1])
+                    risingSteps++;
+                else if (values[index] < values[index - 1])
+                    fallingSteps++;
+            }
+
+            var steps = values.Length - 1;
+            if (risingSteps == steps)
+                return TrendShape.Rising;
+            if (fallingSteps == steps)
+                return TrendShape.Falling;
+
+            // 峰值不在末位，且从峰值到末位的回落幅度明显，视为“曾增长后回落”。
+            if (peakIndex < values.Length - 1 && max > 0)
+            {
+                var drop = max - last;
+                if (drop > 0 && drop / (double)max >= 0.15)
+                    return TrendShape.Peaked;
+            }
+
+            var scale = Math.Max(Math.Abs(first), Math.Abs(max));
+            if (scale > 0 && Math.Abs(last - first) <= scale * 0.05)
+                return TrendShape.Flat;
+
+            return TrendShape.Volatile;
+        }
+
+        private static string GetTrendLabel(TrendShape shape)
+        {
+            switch (shape)
+            {
+                case TrendShape.Rising:
+                    return "持续升";
+                case TrendShape.Falling:
+                    return "持续降";
+                case TrendShape.Peaked:
+                    return "升后降";
+                case TrendShape.Volatile:
+                    return "波动";
+                default:
+                    return "平稳";
+            }
+        }
+
+        /// <summary>只有“持续上升”值得视觉突出，其余保持低调。</summary>
+        private static bool IsTrendEmphasized(TrendShape shape)
+        {
+            return shape == TrendShape.Rising;
+        }
+
+        /// <summary>
+        /// 绘制迷你柱状图。颜色直接取自当前主题的 label 文字色并调节透明度，
+        /// 因此不引入任何自定义配色，深浅主题都能自动适配。
+        /// </summary>
+        private static void DrawSparkline(Rect rect, long[] values, bool emphasize)
+        {
+            if (Event.current.type != EventType.Repaint)
+                return;
+            if (values == null || values.Length == 0 || rect.width <= 0f)
+                return;
+
+            var min = values[0];
+            var max = values[0];
+            foreach (var value in values)
+            {
+                if (value < min)
+                    min = value;
+                if (value > max)
+                    max = value;
+            }
+
+            var range = max - min;
+            var slotWidth = rect.width / values.Length;
+            var barWidth = Mathf.Max(2f, slotWidth - 2f);
+            var color = GUI.skin.label.normal.textColor;
+
+            for (var index = 0; index < values.Length; index++)
+            {
+                // 各快照数值完全相同时画成齐平半高柱，避免误读成“满格”或“空”。
+                var normalized = range <= 0
+                    ? 0.5f
+                    : (float)(values[index] - min) / range;
+
+                var height = Mathf.Max(2f, normalized * (rect.height - 2f));
+                var x = rect.x + index * slotWidth + 1f;
+                var y = rect.y + rect.height - height;
+
+                color.a = emphasize ? 0.80f : 0.32f;
+                EditorGUI.DrawRect(new Rect(x, y, barWidth, height), color);
+            }
+        }
+
+        /// <summary>把 int 序列转成 long 序列，供趋势判定与绘图复用。</summary>
+        private static long[] ToLongSeries(int[] counts)
+        {
+            var series = new long[counts.Length];
+            for (var index = 0; index < counts.Length; index++)
+                series[index] = counts[index];
+            return series;
+        }
+
+        /// <summary>
+        /// 在一行末尾绘制趋势形状文字与迷你柱状图。showSparkline 为 false 时
+        /// 只显示文字标签，用于窗口较窄、类型名需要更多横向空间的场景。
+        /// </summary>
+        private static void DrawTrendShape(long[] values, float height, bool showSparkline)
+        {
+            var shape = ClassifyTrend(values);
+            GUILayout.Label(GetTrendLabel(shape), VumsEditorStyles.MutedLabel, GUILayout.Width(TrendLabelWidth));
+            if (!showSparkline)
+                return;
+
+            var rect = GUILayoutUtility.GetRect(
+                SparklineWidth,
+                height,
+                GUILayout.Width(SparklineWidth),
+                GUILayout.Height(height));
+            DrawSparkline(rect, values, IsTrendEmphasized(shape));
         }
 
         private static ulong RealUsedMemory(ProfileTargetMemoryStats memory)
