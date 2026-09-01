@@ -26,6 +26,8 @@ namespace VUMS.Editor
         private const int LeakPageSize = 20;
         // 大对象引用路径 Tab 展示前 N 大对象；改这里即可调整展示数量
         private const int TopLargeObjectCount = 30;
+        // 重复字符串 Tab 展示前 N 个重复串；改这里即可调整展示数量
+        private const int TopDuplicateStringCount = 50;
         private const long LargeNativeObjectThreshold = 2L * 1024 * 1024;
 
         // 概览指标（与 SnapshotDiff 概览保持一致，便于横向比对）
@@ -62,10 +64,10 @@ namespace VUMS.Editor
         private readonly HashSet<string> _expandedNativeTypeKeys = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> _expandedNativeTypeLargeObjectKeys = new HashSet<string>(StringComparer.Ordinal);
         private readonly List<ResidentNativeGroup> _residentNativeGroups = new List<ResidentNativeGroup>();
-        private bool _residentSectionExpanded = true;
+        private bool _residentSectionExpanded = false;
         private readonly HashSet<string> _expandedResidentTypeKeys = new HashSet<string>(StringComparer.Ordinal);
-        private bool _duplicateSectionExpanded = true;
-        private bool _largeObjectSectionExpanded = true;
+        private bool _duplicateSectionExpanded = false;
+        private bool _largeObjectSectionExpanded = false;
         private int _residentObjectCount;
         private long _residentTotalBytes;
 
@@ -76,8 +78,6 @@ namespace VUMS.Editor
         private long _managedStringBytes;
         private int _managedStringCount;
         private bool _hasAssemblyResult;
-        // 程序集明细按分类查看：当前选中的分类索引（指向有数据的分类列表）
-        private int _selectedAssemblyCategoryIndex = 0;
 
         // 静态字段直接持有：定位“哪个静态字段吃掉了最多内存”，是泄漏根因最直接的入口
         private readonly List<StaticFieldHoldStat> _staticFieldStats = new List<StaticFieldHoldStat>();
@@ -190,9 +190,7 @@ namespace VUMS.Editor
                     case 2:
                         using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
                         {
-                            VumsEditorStyles.DrawSectionHeader(
-                                "重复字符串 Top 20",
-                                "按可避免内存从高到低排列，文本内容仅显示前 100 个字符。");
+                            VumsEditorStyles.DrawSectionHeader($"重复字符串 Top {TopDuplicateStringCount}");
                             EditorGUILayout.TextArea(
                                 _duplicateStringResultText,
                                 VumsEditorStyles.CodeTextArea,
@@ -231,7 +229,7 @@ namespace VUMS.Editor
                 VumsEditorStyles.DrawSectionHeader("托管内存", "用于快速判断托管对象规模与重点排查线索。");
                 OverviewValueRow("托管对象总数", $"{_managedObjectCount:N0}");
                 OverviewValueRow("泄漏 Managed Shell", $"{_leakedObjects.Count:N0}");
-                OverviewValueRow("重复字符串可避免内存（Top 20）", FormatBytes(_duplicateAvoidableBytes));
+                OverviewValueRow($"重复字符串可避免内存（Top {TopDuplicateStringCount}）", FormatBytes(_duplicateAvoidableBytes));
                 OverviewValueRow($"Top {TopLargeObjectCount} 大对象总大小", FormatBytes(_top20LargeObjectTotalBytes));
                 OverviewValueRow("静态字段直接持有", _staticFieldStats.Count > 0
                     ? $"{_staticFieldRootCount:N0} 个对象 / {FormatBytes(_staticFieldTotalBytes)}"
@@ -289,9 +287,7 @@ namespace VUMS.Editor
         {
             using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
-                VumsEditorStyles.DrawSectionHeader(
-                    "优化建议",
-                    "三类排查方向并列：常驻对象（按设计不卸载）、重复资源（疑似可释放）、重点单体资源（占用偏高）。");
+                VumsEditorStyles.DrawSectionHeader("优化建议");
 
                 DrawResidentNativeSection();
                 DrawDuplicateNativeSection();
@@ -578,7 +574,7 @@ namespace VUMS.Editor
             GUILayout.Space(VumsEditorStyles.SectionSpacing);
             using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
-                VumsEditorStyles.DrawSectionHeader("查看方式", "按引用路径聚合可快速识别共同持有源；按对象查看用于核对具体地址。");
+                VumsEditorStyles.DrawSectionHeader("查看方式");
                 _leakDisplayMode = VumsEditorStyles.DrawTabs(_leakDisplayMode, _leakDisplayModes);
             }
             GUILayout.Space(4f);
@@ -1168,7 +1164,7 @@ namespace VUMS.Editor
             using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
                 VumsEditorStyles.DrawSectionHeader(
-                    "静态字段直接持有 Top",
+                    "静态字段直接持有",
                     "仅统计首次被发现时引用边为静态字段的对象（直接持有，不含其递归子对象），直接指出“哪个全局字段在吃内存”。");
                 OverviewValueRow("涉及静态字段数", $"{_staticFieldStats.Count:N0}");
                 OverviewValueRow("直接持有对象数", $"{_staticFieldRootCount:N0}");
@@ -1193,7 +1189,7 @@ namespace VUMS.Editor
             {
                 VumsEditorStyles.DrawSectionHeader(
                     $"按声明类汇总（{_staticFieldClassStats.Count:N0} 个类）",
-                    "按该类所有静态字段直接持有总大小降序；点击类可展开查看具体字段。右键可复制整行。");
+                    "按该类所有静态字段直接持有总大小降序；点击类可展开查看具体字段。");
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     GUILayout.Label("声明类型", EditorStyles.miniBoldLabel, GUILayout.MinWidth(220f));
@@ -1337,7 +1333,7 @@ namespace VUMS.Editor
             {
                 VumsEditorStyles.DrawSectionHeader(
                     $"高风险 XLua 对象（{riskObjects.Length:N0} 个，被静态 / 实例字段持有）",
-                    "静态字段持有的 LuaTable / LuaFunction 几乎必然泄漏（跨场景常驻）；实例字段持有需确认持有者销毁时已清空。右键可复制完整引用路径。");
+                    "静态字段持有的 LuaTable / LuaFunction 几乎必然泄漏（跨场景常驻）；实例字段持有需确认持有者销毁时已清空。");
                 foreach (var obj in riskObjects)
                 {
                     var reasonLabel = GetLeakReasonLabel(obj.Reason);
@@ -1425,7 +1421,6 @@ namespace VUMS.Editor
             }
         }
 
-        private const float AssemblyCategoryColumnWidth = 96f;
         private const float AssemblyCountColumnWidth = 78f;
         private const float AssemblyTypeColumnWidth = 66f;
         private const float AssemblyBytesColumnWidth = 92f;
@@ -1450,6 +1445,8 @@ namespace VUMS.Editor
 
                 foreach (var category in Enum.GetValues(typeof(AssemblyCategory)).Cast<AssemblyCategory>())
                 {
+                    if (category == AssemblyCategory.Runtime)
+                        continue;
                     var stats = _assemblyStats.Where(item => item.Category == category).ToArray();
                     if (stats.Length == 0)
                         continue;
@@ -1466,37 +1463,32 @@ namespace VUMS.Editor
                 OverviewValueRow("合计", $"{FormatBytes(_assemblyTotalBytes)} | {_assemblyObjectCount:N0} 个对象");
             }
 
-            // 明细：先选分类、再展示该分类下的程序集，避免一次性平铺全部
-            GUILayout.Space(VumsEditorStyles.SectionSpacing);
-            var categories = Enum.GetValues(typeof(AssemblyCategory)).Cast<AssemblyCategory>()
-                .Where(category => _assemblyStats.Any(item => item.Category == category))
-                .ToArray();
-
-            if (categories.Length > 0)
+            // 明细：按分类依次铺开，跳过无数据的分类
+            var displayedOrder = new[]
             {
-                if (_selectedAssemblyCategoryIndex < 0 || _selectedAssemblyCategoryIndex >= categories.Length)
-                    _selectedAssemblyCategoryIndex = 0;
-
-                var labels = categories
-                    .Select(category =>
-                        $"{GetCategoryLabel(category)} ({_assemblyStats.Count(item => item.Category == category):N0})")
-                    .ToArray();
-                _selectedAssemblyCategoryIndex = GUILayout.Toolbar(_selectedAssemblyCategoryIndex, labels);
-                var selectedCategory = categories[_selectedAssemblyCategoryIndex];
+                AssemblyCategory.GameCSharp,
+                AssemblyCategory.Unity,
+                AssemblyCategory.ThirdParty,
+                AssemblyCategory.Unknown,
+            };
+            foreach (var category in displayedOrder)
+            {
                 var rows = _assemblyStats
-                    .Where(item => item.Category == selectedCategory)
+                    .Where(item => item.Category == category)
                     .OrderByDescending(item => item.TotalBytes)
                     .ToArray();
+                if (rows.Length == 0)
+                    continue;
 
+                GUILayout.Space(VumsEditorStyles.SectionSpacing);
                 using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
                 {
                     var bytes = rows.Sum(item => item.TotalBytes);
-                    var objects = rows.Sum(item => item.ObjectCount);
                     var ratio = _assemblyTotalBytes > 0 ? bytes * 100.0 / _assemblyTotalBytes : 0.0;
                     VumsEditorStyles.DrawSectionHeader(
-                        $"{GetCategoryLabel(selectedCategory)} 明细（{rows.Length:N0} 个程序集）",
-                        $"该分类合计 {FormatBytes(bytes)}（{ratio:F1}%）；按持有总大小降序；右键可复制整行。");
-                    DrawAssemblyTableHeader(false);
+                        $"{GetCategoryLabel(category)}（{rows.Length:N0} 个程序集）",
+                        $"该分类合计 {FormatBytes(bytes)}（{ratio:F1}%）；按持有总大小降序。");
+                    DrawAssemblyTableHeader();
 
                     foreach (var stat in rows)
                     {
@@ -1511,32 +1503,18 @@ namespace VUMS.Editor
                             this,
                             EditorGUIUtility.singleLineHeight,
                             rowText,
-                            () => DrawAssemblyTableRow(stat, rowRatio, false));
+                            () => DrawAssemblyTableRow(stat, rowRatio));
                     }
                 }
             }
 
             GUILayout.Space(VumsEditorStyles.SectionSpacing);
-            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.CompactCard))
-            {
-                GUILayout.Label(
-                    "怎么读这一页：Assembly-CSharp 是游戏 C# 逻辑侧；第三方库 分类下包含 XLua（Lua 侧）对象"
-                    + "（LuaTable / LuaFunction / 委托与 ObjectTranslator 缓存）的持有量，"
-                    + "它持续增大通常意味着 Lua 侧对象没有被释放。",
-                    VumsEditorStyles.SectionDescription);
-                GUILayout.Space(2f);
-                GUILayout.Label(
-                    "托管字符串在快照中不作为普通对象实例出现，单独成行统计，不计入具体程序集。",
-                    VumsEditorStyles.SectionDescription);
-            }
         }
 
-        private static void DrawAssemblyTableHeader(bool showCategory)
+        private static void DrawAssemblyTableHeader()
         {
             using (new EditorGUILayout.HorizontalScope())
             {
-                if (showCategory)
-                    GUILayout.Label("分类", EditorStyles.miniBoldLabel, GUILayout.Width(AssemblyCategoryColumnWidth));
                 GUILayout.Label("程序集", EditorStyles.miniBoldLabel, GUILayout.ExpandWidth(true));
                 GUILayout.Label("对象数", EditorStyles.miniBoldLabel, GUILayout.Width(AssemblyCountColumnWidth));
                 GUILayout.Label("类型数", EditorStyles.miniBoldLabel, GUILayout.Width(AssemblyTypeColumnWidth));
@@ -1546,12 +1524,10 @@ namespace VUMS.Editor
             }
         }
 
-        private static void DrawAssemblyTableRow(AssemblyMemoryStat stat, double ratio, bool showCategory)
+        private static void DrawAssemblyTableRow(AssemblyMemoryStat stat, double ratio)
         {
             using (new EditorGUILayout.HorizontalScope())
             {
-                if (showCategory)
-                    GUILayout.Label(GetCategoryLabel(stat.Category), GUILayout.Width(AssemblyCategoryColumnWidth));
                 GUILayout.Label(stat.Assembly, GUILayout.ExpandWidth(true));
                 GUILayout.Label($"{stat.ObjectCount:N0}", GUILayout.Width(AssemblyCountColumnWidth));
                 GUILayout.Label($"{stat.TypeCount:N0}", GUILayout.Width(AssemblyTypeColumnWidth));
@@ -1593,8 +1569,8 @@ namespace VUMS.Editor
             _largeNativeObjects.Clear();
             _expandedNativeTypeKeys.Clear();
             _expandedNativeTypeLargeObjectKeys.Clear();
-            _duplicateSectionExpanded = true;
-            _largeObjectSectionExpanded = true;
+            _duplicateSectionExpanded = false;
+            _largeObjectSectionExpanded = false;
             _residentNativeGroups.Clear();
             _residentObjectCount = 0;
             _residentTotalBytes = 0;
@@ -1605,7 +1581,6 @@ namespace VUMS.Editor
             _managedStringBytes = 0;
             _managedStringCount = 0;
             _hasAssemblyResult = false;
-            _selectedAssemblyCategoryIndex = 0;
             _staticFieldStats.Clear();
             _staticFieldClassStats.Clear();
             _expandedStaticFieldClassKeys.Clear();
@@ -2091,9 +2066,8 @@ namespace VUMS.Editor
                 var repeatedStrings = duplicateStrings.Values
                     .Where(item => item.Count > 1)
                     .OrderByDescending(item => item.DuplicateBytes)
-                    .Take(20)
+                    .Take(TopDuplicateStringCount)
                     .ToArray();
-                duplicateStringSb.AppendLine("重复字符串检查 Top 20:");
                 if (repeatedStrings.Length == 0)
                 {
                     duplicateStringSb.AppendLine("  未发现重复字符串实例。");

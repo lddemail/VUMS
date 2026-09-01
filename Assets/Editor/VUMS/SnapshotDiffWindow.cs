@@ -19,6 +19,9 @@ namespace VUMS.Editor
     public class SnapshotDiffWindow : EditorWindow
     {
         private const int MaxSnapshotCount = 5;
+        // 重复字符串合并对比表每对展示前 N 行；改这里即可调整对比展示数量
+        private const int TopDuplicateStringDiffCount = 50;
+        private const int DuplicatePreviewMaxLength = 60;
         private static readonly string[] SnapshotNames = { "A", "B", "C", "D", "E" };
 
         private readonly string[] _paths = new string[MaxSnapshotCount];
@@ -300,11 +303,7 @@ namespace VUMS.Editor
                 DuplicateAvoidableBytes = duplicates.Values.Where(item => item.Count > 1).Sum(item => item.DuplicateBytes),
                 Top50LargeObjectBytes = SumTopLargeObjects(file, objects),
                 MemoryStats = file.ProfileTargetMemoryStats,
-                DuplicateTop20 = duplicates.Values
-                    .Where(item => item.Count > 1)
-                    .OrderByDescending(item => item.DuplicateBytes)
-                    .Take(20)
-                    .ToList(),
+                DuplicateStats = duplicates,
             };
         }
 
@@ -581,20 +580,50 @@ namespace VUMS.Editor
 
         private void DrawDuplicateStringTab()
         {
+            if (_snapshots.Count < 2)
+            {
+                GUILayout.Space(VumsEditorStyles.SectionSpacing);
+                VumsEditorStyles.DrawStatus("请至少选择两个快照以对比重复字符串。", MessageType.Info);
+                return;
+            }
+
+            var lastName = _snapshots[_snapshots.Count - 1].Name;
+
             using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
-                VumsEditorStyles.DrawSectionHeader("重复字符串趋势", "对比各快照的可避免内存，并分别列出 Top 20。 ");
+                VumsEditorStyles.DrawSectionHeader(
+                    "重复字符串对比",
+                    $"依次对比每个字符串在 {string.Join("→", _snapshots.Select(item => item.Name))} 各快照的次数/字节；" +
+                    $"单元格上排次数/Δ次数，下排字节/Δ字节，Δ 为相对上一快照的增量；" +
+                    $"按最终快照 {lastName} 的字节大小降序展示（缺失快照按字节 0 排到末尾），最多 {TopDuplicateStringDiffCount} 行。");
                 OverviewSeriesRow("重复字符串可避免内存", _snapshots.Select(item => item.DuplicateAvoidableBytes), true);
             }
 
-            foreach (var snapshot in _snapshots)
+            var series = BuildDuplicateStringSeries();
+            if (series.Count == 0)
             {
                 GUILayout.Space(VumsEditorStyles.SectionSpacing);
-                using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
-                {
-                    VumsEditorStyles.DrawSectionHeader($"快照 {snapshot.Name} · Top 20", "按可避免内存从高到低排列。");
-                    DrawDuplicateStringList(this, snapshot.DuplicateTop20);
-                }
+                VumsEditorStyles.DrawStatus("未发现重复字符串差异（所有快照中均未出现次数 > 1 的重复字符串）。", MessageType.Info);
+                return;
+            }
+
+            var lastIndex = _snapshots.Count - 1;
+            var topRows = series
+                .OrderByDescending(item => item.Bytes[lastIndex])
+                .ThenBy(item => item.Value, StringComparer.Ordinal)
+                .Take(TopDuplicateStringDiffCount)
+                .ToList();
+
+            var snapshotNames = _snapshots.Select(item => item.Name).ToArray();
+            GUILayout.Space(VumsEditorStyles.SectionSpacing);
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+            {
+                VumsEditorStyles.DrawSectionHeader(
+                    $"重复字符串对比明细（{topRows.Count:N0} / {series.Count:N0} 行）",
+                    "缺失快照显示“无”；Δ 列红 = 增大/新增，绿 = 减小/释放。右键可复制整行（含全序列数据）。");
+                DrawDuplicateSeriesHeader();
+                foreach (var row in topRows)
+                    DrawDuplicateSeriesRow(this, row, snapshotNames);
             }
         }
 
@@ -855,25 +884,243 @@ namespace VUMS.Editor
             return value;
         }
 
-        private static void DrawDuplicateStringList(EditorWindow window, List<DuplicateStringStat> list)
+        private enum DuplicateDeltaStatus
         {
-            if (list == null || list.Count == 0)
-            {
-                EditorGUILayout.HelpBox("未发现重复字符串实例。", MessageType.Info);
-                return;
-            }
+            New,
+            Removed,
+            Rising,
+            Falling,
+            Volatile,
+            Same,
+        }
 
-            foreach (var stat in list)
+        /// <summary>
+        /// 一个重复字符串在全部快照序列上的横向视图：每个快照各记次数/字节，
+        /// Present 标记该快照是否被视为重复（Count > 1）。Status 基于全序列判定。
+        /// </summary>
+        private sealed class DuplicateStringSeries
+        {
+            public string Value;
+            public int[] Counts;
+            public long[] Bytes;
+            public bool[] Present;
+            public DuplicateDeltaStatus Status;
+        }
+
+        /// <summary>
+        /// 收集所有快照中“至少在一处 Count > 1”的字符串，构建横向全序列视图。
+        /// 某快照缺失或 Count ≤ 1 时记 Present=false，渲染显示“无”。
+        /// </summary>
+        private List<DuplicateStringSeries> BuildDuplicateStringSeries()
+        {
+            var snapCount = _snapshots.Count;
+            var presentKeys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var snap in _snapshots)
+                foreach (var kv in snap.DuplicateStats)
+                    if (kv.Value.Count > 1)
+                        presentKeys.Add(kv.Key);
+
+            var rows = new List<DuplicateStringSeries>(presentKeys.Count);
+            foreach (var key in presentKeys)
             {
-                var preview = stat.Value.Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
-                if (preview.Length > 100)
-                    preview = preview.Substring(0, 100) + "...";
-                var rowText = $"{stat.Count,6:N0} x | 总计 {FormatBytes(stat.TotalBytes),10} | \"{preview}\"";
-                VumsEditorStyles.CopyableRow(
-                    window,
-                    EditorGUIUtility.singleLineHeight,
-                    rowText,
-                    () => EditorGUILayout.LabelField($"  {rowText}"));
+                var counts = new int[snapCount];
+                var bytes = new long[snapCount];
+                var present = new bool[snapCount];
+                for (var i = 0; i < snapCount; i++)
+                {
+                    if (_snapshots[i].DuplicateStats.TryGetValue(key, out var stat) && stat.Count > 1)
+                    {
+                        counts[i] = stat.Count;
+                        bytes[i] = stat.TotalBytes;
+                        present[i] = true;
+                    }
+                }
+                rows.Add(new DuplicateStringSeries
+                {
+                    Value = key,
+                    Counts = counts,
+                    Bytes = bytes,
+                    Present = present,
+                    Status = GetSeriesStatus(counts, present),
+                });
+            }
+            return rows;
+        }
+
+        /// <summary>
+        /// 基于全序列（A→E）判定状态：A 无 E 有=新增；A 有 E 无=消失；
+        /// 中间既有涨又有跌=波动；否则按整体方向升/降；首尾一致=持平。
+        /// </summary>
+        private static DuplicateDeltaStatus GetSeriesStatus(int[] counts, bool[] present)
+        {
+            var n = counts.Length;
+            if (!present[0] && present[n - 1])
+                return DuplicateDeltaStatus.New;
+            if (present[0] && !present[n - 1])
+                return DuplicateDeltaStatus.Removed;
+
+            var hasRise = false;
+            var hasFall = false;
+            for (var i = 1; i < n; i++)
+            {
+                if (!present[i] && !present[i - 1])
+                    continue;
+                if (counts[i] > counts[i - 1])
+                    hasRise = true;
+                else if (counts[i] < counts[i - 1])
+                    hasFall = true;
+            }
+            if (hasRise && hasFall)
+                return DuplicateDeltaStatus.Volatile;
+            if (hasRise)
+                return DuplicateDeltaStatus.Rising;
+            if (hasFall)
+                return DuplicateDeltaStatus.Falling;
+            return DuplicateDeltaStatus.Same;
+        }
+
+        private void DrawDuplicateSeriesHeader()
+        {
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.Label("字符串预览", EditorStyles.miniBoldLabel, GUILayout.ExpandWidth(true));
+                for (var i = 0; i < _snapshots.Count; i++)
+                    GUILayout.Label(_snapshots[i].Name, EditorStyles.miniBoldLabel, GUILayout.Width(76f));
+                GUILayout.Label("状态", EditorStyles.miniBoldLabel, GUILayout.Width(48f));
+            }
+        }
+
+        private static void DrawDuplicateSeriesRow(EditorWindow window, DuplicateStringSeries row, string[] snapshotNames)
+        {
+            var preview = row.Value
+                .Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
+            var isTruncated = preview.Length > DuplicatePreviewMaxLength;
+            var displayedPreview = isTruncated
+                ? preview.Substring(0, DuplicatePreviewMaxLength) + "..."
+                : preview;
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append(preview);
+            for (var i = 0; i < row.Counts.Length; i++)
+            {
+                sb.Append(" | ").Append(snapshotNames[i]).Append(' ');
+                if (row.Present[i])
+                {
+                    var dCount = i == 0 ? 0 : row.Counts[i] - row.Counts[i - 1];
+                    var dByte = i == 0 ? 0L : row.Bytes[i] - row.Bytes[i - 1];
+                    sb.Append(row.Counts[i].ToString("N0"))
+                        .Append('(').Append(DeltaCountText(dCount)).Append(") / ")
+                        .Append(FormatBytes(row.Bytes[i]))
+                        .Append('(').Append(FormatBytes(dByte)).Append(')');
+                }
+                else
+                {
+                    sb.Append("无");
+                }
+            }
+            sb.Append(" | ").Append(StatusLabel(row.Status));
+
+            VumsEditorStyles.CopyableRow(
+                window,
+                EditorGUIUtility.singleLineHeight * 4f,
+                sb.ToString(),
+                () =>
+                {
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        var label = isTruncated
+                            ? new GUIContent(displayedPreview, preview)
+                            : new GUIContent(displayedPreview);
+                        GUILayout.Label(label, GUILayout.ExpandWidth(true));
+                        for (var i = 0; i < row.Counts.Length; i++)
+                            DrawSeriesCell(row, i);
+                        DrawColoredStatus(row.Status, 48f);
+                    }
+                });
+        }
+
+        private static void DrawSeriesCell(DuplicateStringSeries row, int i)
+        {
+            using (new EditorGUILayout.VerticalScope(GUILayout.Width(76f)))
+            {
+                if (row.Present[i])
+                {
+                    GUILayout.Label(row.Counts[i].ToString("N0"), EditorStyles.boldLabel);
+                    var dCount = i == 0 ? 0 : row.Counts[i] - row.Counts[i - 1];
+                    DrawDeltaMini(DeltaCountText(dCount), dCount);
+                    GUILayout.Space(2f);
+                    GUILayout.Label(FormatBytes(row.Bytes[i]), EditorStyles.miniLabel);
+                    var dByte = i == 0 ? 0L : row.Bytes[i] - row.Bytes[i - 1];
+                    DrawDeltaMini(FormatBytes(dByte), dByte);
+                }
+                else
+                {
+                    GUILayout.Label("无", VumsEditorStyles.MutedLabel);
+                    GUILayout.Label("—", VumsEditorStyles.MutedLabel);
+                    GUILayout.Space(2f);
+                    GUILayout.Label("无", VumsEditorStyles.MutedLabel);
+                    GUILayout.Label("—", VumsEditorStyles.MutedLabel);
+                }
+            }
+        }
+
+        private static void DrawDeltaMini(string text, long delta)
+        {
+            GUI.contentColor = DeltaColor(delta);
+            GUILayout.Label(text, EditorStyles.miniLabel);
+            GUI.contentColor = Color.white;
+        }
+
+        private static string DeltaCountText(int delta)
+        {
+            return delta == 0 ? "0" : (delta > 0 ? "+" : "") + delta.ToString("N0");
+        }
+
+        private static void DrawColoredStatus(DuplicateDeltaStatus status, float width)
+        {
+            using (new EditorGUILayout.HorizontalScope(GUILayout.Width(width)))
+            {
+                GUI.contentColor = StatusColor(status);
+                GUILayout.Label(StatusLabel(status));
+                GUI.contentColor = Color.white;
+            }
+        }
+
+        private static Color DeltaColor(long delta)
+        {
+            if (delta > 0)
+                return new Color(0.88f, 0.30f, 0.30f, 1f);
+            if (delta < 0)
+                return new Color(0.40f, 0.78f, 0.40f, 1f);
+            return GUI.skin.label.normal.textColor;
+        }
+
+        private static Color StatusColor(DuplicateDeltaStatus status)
+        {
+            switch (status)
+            {
+                case DuplicateDeltaStatus.New:
+                case DuplicateDeltaStatus.Rising:
+                    return new Color(0.88f, 0.30f, 0.30f, 1f);
+                case DuplicateDeltaStatus.Removed:
+                case DuplicateDeltaStatus.Falling:
+                    return new Color(0.40f, 0.78f, 0.40f, 1f);
+                case DuplicateDeltaStatus.Volatile:
+                default:
+                    return GUI.skin.label.normal.textColor;
+            }
+        }
+
+        private static string StatusLabel(DuplicateDeltaStatus status)
+        {
+            switch (status)
+            {
+                case DuplicateDeltaStatus.New: return "新增";
+                case DuplicateDeltaStatus.Removed: return "消失";
+                case DuplicateDeltaStatus.Rising: return "升";
+                case DuplicateDeltaStatus.Falling: return "降";
+                case DuplicateDeltaStatus.Volatile: return "波动";
+                default: return "持平";
             }
         }
 
@@ -1073,7 +1320,7 @@ namespace VUMS.Editor
             public long DuplicateAvoidableBytes;
             public long Top50LargeObjectBytes;
             public ProfileTargetMemoryStats MemoryStats;
-            public List<DuplicateStringStat> DuplicateTop20;
+            public Dictionary<string, DuplicateStringStat> DuplicateStats;
         }
 
         private sealed class TypeCountDiff
