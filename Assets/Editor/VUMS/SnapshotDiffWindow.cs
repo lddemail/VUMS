@@ -35,7 +35,6 @@ namespace VUMS.Editor
         private Vector2 _scroll;
         private readonly string[] _tabs = { "概览", "类型数量增量", "泄漏 Shell 增量", "重复字符串" };
         private int _selectedTab;
-        private bool _onlyXluaTypes;
 
         [MenuItem("VUMS/SnapshotDiff", false, 3)]
         public static void OpenWindow()
@@ -438,9 +437,7 @@ namespace VUMS.Editor
 
         private void DrawTypeDeltaTab()
         {
-            var displayList = _onlyXluaTypes
-                ? _typeDiffs.Where(item => VumsEditorStyles.IsXluaTypeName(item.TypeName)).ToArray()
-                : _typeDiffs.ToArray();
+            var displayList = _typeDiffs.ToArray();
             var newTypeCount = displayList.Count(item => IsNewType(item.Counts));
             var removedTypeCount = displayList.Count(item => IsRemovedType(item.Counts));
             var risingCount = displayList.Count(item => ClassifyTrend(ToLongSeries(item.Counts)) == TrendShape.Rising);
@@ -465,21 +462,10 @@ namespace VUMS.Editor
                     VumsEditorStyles.SectionDescription);
             }
             GUILayout.Space(VumsEditorStyles.SectionSpacing);
-            _onlyXluaTypes = EditorGUILayout.ToggleLeft("只看 XLua 类型", _onlyXluaTypes);
-            if (_onlyXluaTypes)
-            {
-                EditorGUILayout.HelpBox(
-                    "LuaTable / LuaFunction 是被 Lua 虚拟机管理的对象，其数量持续增长通常意味着 Lua 侧 table / function 未被释放"
-                    + "（C# 侧仍持有引用，或 Lua 侧全局变量 / 注册表未清理）。DelegateBridge 数量偏高 = 大量 Lua 回调绑定到 C# 事件 / 委托而未反注册。",
-                    MessageType.Info);
-            }
-            GUILayout.Space(4f);
             if (displayList.Length == 0)
             {
                 EditorGUILayout.HelpBox(
-                    _onlyXluaTypes
-                        ? "筛选 XLua 类型后，所选快照之间没有类型数量变化。"
-                        : "所选快照之间没有类型数量变化。",
+                    "所选快照之间没有类型数量变化。",
                     MessageType.Info);
                 return;
             }

@@ -40,7 +40,7 @@ namespace VUMS.Editor
         private string _duplicateStringResultText = "请选择一个 .snap 快照文件。";
         private readonly string[] _resultTabs =
         {
-            "概览", "托管内存泄漏", "重复字符串", "大对象引用路径", "程序集内存", "静态字段持有", "XLua 内存",
+            "概览", "托管内存泄漏", "重复字符串", "大对象引用路径", "程序集内存", "静态字段持有",
         };
         private Vector2 _scroll;
         private int _selectedResultTab;
@@ -86,18 +86,6 @@ namespace VUMS.Editor
         private long _staticFieldTotalBytes;
         private int _staticFieldRootCount;
         private bool _hasStaticFieldResult;
-
-        // XLua 专项：把 Lua 侧相关托管对象（LuaTable / LuaFunction / DelegateBridge / ObjectTranslator 等）
-        // 单独聚合，直接回答“内存是 Lua 侧吃掉还是 C# 侧吃掉”，并标记高风险持有方式。
-        private readonly List<XluaObjectInfo> _xluaObjects = new List<XluaObjectInfo>();
-        private readonly List<XluaCategoryStat> _xluaCategoryStats = new List<XluaCategoryStat>();
-        private long _xluaTotalBytes;
-        private int _xluaTotalCount;
-        private int _xluaStaticFieldCount;
-        private int _xluaInstanceFieldCount;
-        private int _xluaArrayElementCount;
-        private int _xluaGcRootCount;
-        private bool _hasXluaResult;
 
         // 泄漏来源分类：按每个泄漏 Shell 首次被发现时的引用边（LoadedReason）聚合
         private int[] _leakReasonCounts = new int[4];
@@ -206,9 +194,6 @@ namespace VUMS.Editor
                     case 5:
                         DrawStaticFieldTab();
                         break;
-                    case 6:
-                        DrawXluaTab();
-                        break;
                 }
             }
             EditorGUILayout.EndScrollView();
@@ -234,8 +219,6 @@ namespace VUMS.Editor
                 OverviewValueRow("静态字段直接持有", _staticFieldStats.Count > 0
                     ? $"{_staticFieldRootCount:N0} 个对象 / {FormatBytes(_staticFieldTotalBytes)}"
                     : "-");
-                if (_hasXluaResult)
-                    OverviewValueRow("XLua 侧对象", $"{_xluaTotalCount:N0} 个 / {FormatBytes(_xluaTotalBytes)}（见「XLua 内存」页）");
             }
 
             GUILayout.Space(VumsEditorStyles.SectionSpacing);
@@ -1047,93 +1030,6 @@ namespace VUMS.Editor
             _hasStaticFieldResult = _staticFieldStats.Count > 0;
         }
 
-        /// <summary>
-        /// XLua 专项：聚合 Lua 侧相关托管对象。数据在 Analyze 的全堆扫描里已顺手收集到
-        /// _xluaObjects，这里只做分类与风险统计，不再遍历堆。
-        /// </summary>
-        private void CollectXluaStats()
-        {
-            _xluaCategoryStats.Clear();
-            _xluaTotalBytes = 0;
-            _xluaTotalCount = 0;
-            _xluaStaticFieldCount = 0;
-            _xluaInstanceFieldCount = 0;
-            _xluaArrayElementCount = 0;
-            _xluaGcRootCount = 0;
-            _hasXluaResult = false;
-
-            if (_xluaObjects.Count == 0)
-                return;
-
-            var byCategory = new Dictionary<string, XluaCategoryStat>(StringComparer.Ordinal);
-            foreach (var obj in _xluaObjects)
-            {
-                if (!byCategory.TryGetValue(obj.Category, out var stat))
-                {
-                    stat = new XluaCategoryStat { Category = obj.Category };
-                    byCategory.Add(obj.Category, stat);
-                }
-
-                stat.ObjectCount++;
-                stat.TotalBytes += obj.SizeBytes;
-                switch (obj.Reason)
-                {
-                    case LoadedReason.StaticField:
-                        stat.StaticFieldCount++;
-                        _xluaStaticFieldCount++;
-                        break;
-                    case LoadedReason.InstanceField:
-                        stat.InstanceFieldCount++;
-                        _xluaInstanceFieldCount++;
-                        break;
-                    case LoadedReason.ArrayElement:
-                        stat.ArrayElementCount++;
-                        _xluaArrayElementCount++;
-                        break;
-                    case LoadedReason.GcRoot:
-                        stat.GcRootCount++;
-                        _xluaGcRootCount++;
-                        break;
-                }
-
-                _xluaTotalBytes += obj.SizeBytes;
-            }
-
-            _xluaTotalCount = _xluaObjects.Count;
-            _xluaCategoryStats.AddRange(byCategory.Values
-                .OrderByDescending(item => item.TotalBytes)
-                .ThenBy(item => item.Category, StringComparer.Ordinal));
-            _hasXluaResult = true;
-        }
-
-        /// <summary>
-        /// 判断一个托管类型是否属于 XLua（Lua 侧）。XLua 2.x 对象位于 XLua 命名空间（v2.1.15+ 兼容），
-        /// 其中 LuaTable / LuaFunction 是被 Lua 虚拟机直接管理的对象，DelegateBridge 是 C#↔Lua 委托桥。
-        /// </summary>
-        private static bool IsXluaType(string typeName, out string category)
-        {
-            category = string.Empty;
-            if (!VumsEditorStyles.IsXluaTypeName(typeName))
-                return false;
-
-            if (typeName.IndexOf("LuaTable", StringComparison.Ordinal) >= 0)
-                category = "LuaTable（Lua 表）";
-            else if (typeName.IndexOf("LuaFunction", StringComparison.Ordinal) >= 0)
-                category = "LuaFunction（Lua 函数）";
-            else if (typeName.IndexOf("DelegateBridge", StringComparison.Ordinal) >= 0)
-                category = "DelegateBridge（C#↔Lua 委托桥）";
-            else if (typeName.IndexOf("ObjectTranslator", StringComparison.Ordinal) >= 0)
-                category = "ObjectTranslator（对象翻译器）";
-            else if (typeName.IndexOf("LuaEnv", StringComparison.Ordinal) >= 0)
-                category = "LuaEnv（Lua 虚拟机）";
-            else if (typeName.IndexOf("LuaCoroutine", StringComparison.Ordinal) >= 0)
-                category = "LuaCoroutine（Lua 协程）";
-            else
-                category = "XLua 其他类型";
-
-            return true;
-        }
-
         private static string GetLeakReasonLabel(LoadedReason reason)
         {
             switch (reason)
@@ -1248,121 +1144,6 @@ namespace VUMS.Editor
             }
         }
 
-        private void DrawXluaTab()
-        {
-            if (!_hasXluaResult)
-            {
-                VumsEditorStyles.DrawEmptyState(
-                    "暂无 XLua 侧内存统计",
-                    _analyzing ? "正在聚合 XLua 侧内存..." : "请选择一个 .snap 快照文件开始分析。");
-                return;
-            }
-
-            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
-            {
-                VumsEditorStyles.DrawSectionHeader(
-                    "XLua 侧托管内存概览",
-                    "仅聚合命名空间以 XLua. 开头的托管对象（LuaTable / LuaFunction / DelegateBridge / ObjectTranslator / LuaEnv 等）。");
-                OverviewValueRow("XLua 相关对象总数", $"{_xluaTotalCount:N0}");
-                OverviewValueRow("XLua 相关对象总大小", FormatBytes(_xluaTotalBytes));
-                VumsEditorStyles.DrawDivider();
-                OverviewValueRow("被静态字段持有（高风险，跨场景常驻）", $"{_xluaStaticFieldCount:N0}");
-                OverviewValueRow("被实例字段持有（需确认持有者已销毁）", $"{_xluaInstanceFieldCount:N0}");
-                OverviewValueRow("被数组 / 集合持有", $"{_xluaArrayElementCount:N0}");
-                OverviewValueRow("GC Root 直接持有", $"{_xluaGcRootCount:N0}");
-                GUILayout.Space(4f);
-                GUILayout.Label(
-                    "LuaTable / LuaFunction 是被 Lua 虚拟机管理的对象，其数量持续增长通常意味着 Lua 侧 table / function 未被释放"
-                    + "（C# 侧仍持有引用，或 Lua 侧全局变量 / 注册表未清理）。DelegateBridge 数量偏高 = 大量 Lua 回调绑定到 C# 事件 / 委托而未反注册。",
-                    VumsEditorStyles.SectionDescription);
-            }
-
-            GUILayout.Space(VumsEditorStyles.SectionSpacing);
-            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
-            {
-                VumsEditorStyles.DrawSectionHeader(
-                    $"按类型分类（{_xluaCategoryStats.Count:N0} 类）",
-                    "按持有总大小降序；静态 / 实例 / 数组 / GC Root 列表示各分类对象的持有方式分布。");
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    GUILayout.Label("分类", EditorStyles.miniBoldLabel, GUILayout.ExpandWidth(true));
-                    GUILayout.Label("对象数", EditorStyles.miniBoldLabel, GUILayout.Width(GcHandleCountColumnWidth));
-                    GUILayout.Label("总大小", EditorStyles.miniBoldLabel, GUILayout.Width(GcHandleBytesColumnWidth));
-                    GUILayout.Label("静态", EditorStyles.miniBoldLabel, GUILayout.Width(GcHandleCountColumnWidth));
-                    GUILayout.Label("实例", EditorStyles.miniBoldLabel, GUILayout.Width(GcHandleCountColumnWidth));
-                    GUILayout.Label("数组", EditorStyles.miniBoldLabel, GUILayout.Width(GcHandleCountColumnWidth));
-                    GUILayout.Label("GC Root", EditorStyles.miniBoldLabel, GUILayout.Width(GcHandleCountColumnWidth));
-                }
-
-                foreach (var stat in _xluaCategoryStats)
-                {
-                    var rowText =
-                        $"{stat.Category} | {stat.ObjectCount:N0} 个 | {FormatBytes(stat.TotalBytes)} | " +
-                        $"静态 {stat.StaticFieldCount:N0} | 实例 {stat.InstanceFieldCount:N0} | " +
-                        $"数组 {stat.ArrayElementCount:N0} | GC Root {stat.GcRootCount:N0}";
-                    VumsEditorStyles.CopyableRow(
-                        this,
-                        EditorGUIUtility.singleLineHeight,
-                        rowText,
-                        () =>
-                        {
-                            using (new EditorGUILayout.HorizontalScope())
-                            {
-                                GUILayout.Label(stat.Category, GUILayout.ExpandWidth(true));
-                                GUILayout.Label($"{stat.ObjectCount:N0}", GUILayout.Width(GcHandleCountColumnWidth));
-                                GUILayout.Label(FormatBytes(stat.TotalBytes), GUILayout.Width(GcHandleBytesColumnWidth));
-                                GUILayout.Label($"{stat.StaticFieldCount:N0}", GUILayout.Width(GcHandleCountColumnWidth));
-                                GUILayout.Label($"{stat.InstanceFieldCount:N0}", GUILayout.Width(GcHandleCountColumnWidth));
-                                GUILayout.Label($"{stat.ArrayElementCount:N0}", GUILayout.Width(GcHandleCountColumnWidth));
-                                GUILayout.Label($"{stat.GcRootCount:N0}", GUILayout.Width(GcHandleCountColumnWidth));
-                            }
-                        });
-                }
-            }
-
-            var riskObjects = _xluaObjects
-                .Where(item => item.Reason == LoadedReason.StaticField || item.Reason == LoadedReason.InstanceField)
-                .OrderByDescending(item => item.SizeBytes)
-                .Take(50)
-                .ToArray();
-            if (riskObjects.Length == 0)
-                return;
-
-            GUILayout.Space(VumsEditorStyles.SectionSpacing);
-            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
-            {
-                VumsEditorStyles.DrawSectionHeader(
-                    $"高风险 XLua 对象（{riskObjects.Length:N0} 个，被静态 / 实例字段持有）",
-                    "静态字段持有的 LuaTable / LuaFunction 几乎必然泄漏（跨场景常驻）；实例字段持有需确认持有者销毁时已清空。");
-                foreach (var obj in riskObjects)
-                {
-                    var reasonLabel = GetLeakReasonLabel(obj.Reason);
-                    var holder = obj.RetentionPathNodes != null && obj.RetentionPathNodes.Length > 1
-                        ? obj.RetentionPathNodes[1]
-                        : "(未知持有者)";
-                    var fullPath = obj.RetentionPathNodes != null && obj.RetentionPathNodes.Length > 0
-                        ? string.Join(" <- ", obj.RetentionPathNodes)
-                        : $"{obj.TypeName} @ 0x{obj.Address:X}";
-                    var rowText =
-                        $"[{reasonLabel}] {obj.TypeName} @ 0x{obj.Address:X} | {FormatBytes(obj.SizeBytes)} | {holder}";
-                    VumsEditorStyles.CopyableRow(
-                        this,
-                        EditorGUIUtility.singleLineHeight,
-                        fullPath,
-                        () =>
-                        {
-                            using (new EditorGUILayout.HorizontalScope())
-                            {
-                                GUILayout.Label($"[{reasonLabel}] {obj.TypeName}", GUILayout.MinWidth(200f));
-                                GUILayout.Label($"0x{obj.Address:X}", GUILayout.Width(120f));
-                                GUILayout.Label(FormatBytes(obj.SizeBytes), GUILayout.Width(GcHandleBytesColumnWidth));
-                                GUILayout.Label(holder, GUILayout.ExpandWidth(true));
-                            }
-                        });
-                }
-            }
-        }
-
         private const string UnknownAssemblyLabel = "（未标注程序集）";
         private const string ManagedStringAssemblyLabel = "System.String（托管字符串）";
 
@@ -1384,8 +1165,7 @@ namespace VUMS.Editor
             if (string.IsNullOrEmpty(assembly) || string.Equals(assembly, UnknownAssemblyLabel, StringComparison.Ordinal))
                 return AssemblyCategory.Unknown;
 
-            // XLua 运行时（v2.1.15+）随项目以第三方库形式引入，归入第三方库分类；
-            // 其对象级分析见独立「XLua 内存」页（按命名空间判定）。
+            // XLua 运行时随项目以第三方库形式引入，归入第三方库分类。
             if (assembly.IndexOf("XLua", StringComparison.OrdinalIgnoreCase) >= 0)
                 return AssemblyCategory.ThirdParty;
             if (assembly.StartsWith("Assembly-CSharp", StringComparison.Ordinal))
@@ -1588,15 +1368,6 @@ namespace VUMS.Editor
             _staticFieldRootCount = 0;
             _hasStaticFieldResult = false;
             _leakReasonCounts = new int[4];
-            _xluaObjects.Clear();
-            _xluaCategoryStats.Clear();
-            _xluaTotalBytes = 0;
-            _xluaTotalCount = 0;
-            _xluaStaticFieldCount = 0;
-            _xluaInstanceFieldCount = 0;
-            _xluaArrayElementCount = 0;
-            _xluaGcRootCount = 0;
-            _hasXluaResult = false;
             EditorApplication.delayCall -= RunAnalysisOnce;
             EditorApplication.delayCall += RunAnalysisOnce;
             Repaint();
@@ -1740,27 +1511,6 @@ namespace VUMS.Editor
             public int ObjectCount;
             public long TotalBytes;
             public readonly List<StaticFieldHoldStat> Fields = new List<StaticFieldHoldStat>();
-        }
-
-        private sealed class XluaObjectInfo
-        {
-            public string TypeName;
-            public string Category;
-            public ulong Address;
-            public long SizeBytes;
-            public LoadedReason Reason;
-            public string[] RetentionPathNodes;
-        }
-
-        private sealed class XluaCategoryStat
-        {
-            public string Category;
-            public int ObjectCount;
-            public long TotalBytes;
-            public int StaticFieldCount;
-            public int InstanceFieldCount;
-            public int ArrayElementCount;
-            public int GcRootCount;
         }
 
         private sealed class NativeTypeStat
@@ -2007,20 +1757,6 @@ namespace VUMS.Editor
                         RetentionPathNodes = GetSafeRetentionPathNodes(file, obj),
                     };
                     retainedObjects.Add(retainedInfo);
-
-                    // XLua 专项：在同一遍扫描里顺手收集 Lua 侧相关对象，避免额外全堆遍历。
-                    if (IsXluaType(retainedInfo.TypeName, out var xluaCategory))
-                    {
-                        _xluaObjects.Add(new XluaObjectInfo
-                        {
-                            TypeName = retainedInfo.TypeName,
-                            Category = xluaCategory,
-                            Address = obj.ObjectAddress,
-                            SizeBytes = rawInfo.Size,
-                            Reason = obj.LoadedReason,
-                            RetentionPathNodes = retainedInfo.RetentionPathNodes,
-                        });
-                    }
                 }
 
                 var selectedLargeObjects = retainedObjects
@@ -2041,9 +1777,6 @@ namespace VUMS.Editor
 
                 EditorUtility.DisplayProgressBar("分析中", "正在统计静态字段持有...", 0.74f);
                 CollectStaticFieldStats(file);
-
-                EditorUtility.DisplayProgressBar("分析中", "正在聚合 XLua 侧内存...", 0.75f);
-                CollectXluaStats();
 
                 EditorUtility.DisplayProgressBar("分析中", "正在检测重复字符串...", 0.76f);
                 var duplicateStrings = new Dictionary<string, DuplicateStringStat>(StringComparer.Ordinal);
