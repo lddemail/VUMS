@@ -186,5 +186,18 @@ namespace VUMS.Editor
         {
             return GUI.skin.label.normal.textColor;
         }
+
+        /// <summary>
+        /// 判断一个托管类型名是否属于 XLua（Lua 侧）。兼容范围：XLua v2.1.15 (2020-06-24) 及更高版本。
+        /// XLua 2.x 的运行时类型全部位于 XLua 命名空间（含 XLua.LuaDLL / XLua.TemplateEngine / XLua.Gen
+        /// 等子命名空间），例如 LuaTable / LuaFunction 由 Lua 虚拟机直接管理，DelegateBridge 是
+        /// C#↔Lua 委托桥。注：XLua 2.x 不使用 LuaInterface 命名空间（属早期 NLua/slua 生态），故不纳入。
+        /// </summary>
+        internal static bool IsXluaTypeName(string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName))
+                return false;
+            return typeName.StartsWith("XLua.", StringComparison.Ordinal);
+        }
     }
 }
