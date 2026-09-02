@@ -37,7 +37,8 @@ namespace VUMS.Editor
         private bool _hasNativeStats;
 
         private string _managedLeakResultText = "请选择一个 .snap 快照文件。";
-        private string _duplicateStringResultText = "请选择一个 .snap 快照文件。";
+        private DuplicateStringStat[] _duplicateStringStats = Array.Empty<DuplicateStringStat>();
+        private bool _hasDuplicateStringResult;
         private readonly string[] _resultTabs =
         {
             "概览", "托管内存泄漏", "重复字符串", "大对象引用路径", "程序集内存", "静态字段持有",
@@ -63,6 +64,7 @@ namespace VUMS.Editor
         private readonly List<NativeObjectInfo> _largeNativeObjects = new List<NativeObjectInfo>();
         private readonly HashSet<string> _expandedNativeTypeKeys = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> _expandedNativeTypeLargeObjectKeys = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> _expandedLargeObjectTypeKeys = new HashSet<string>(StringComparer.Ordinal);
         private readonly List<ResidentNativeGroup> _residentNativeGroups = new List<ResidentNativeGroup>();
         private bool _residentSectionExpanded = false;
         private readonly HashSet<string> _expandedResidentTypeKeys = new HashSet<string>(StringComparer.Ordinal);
@@ -176,14 +178,7 @@ namespace VUMS.Editor
                         DrawManagedLeakTab();
                         break;
                     case 2:
-                        using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
-                        {
-                            VumsEditorStyles.DrawSectionHeader($"重复字符串 Top {TopDuplicateStringCount}");
-                            EditorGUILayout.TextArea(
-                                _duplicateStringResultText,
-                                VumsEditorStyles.CodeTextArea,
-                                GUILayout.ExpandHeight(true));
-                        }
+                        DrawDuplicateStringTab();
                         break;
                     case 3:
                         DrawLargeObjectRetentionTab();
@@ -759,6 +754,96 @@ namespace VUMS.Editor
             }
         }
 
+        private void DrawDuplicateStringTab()
+        {
+            if (!_hasDuplicateStringResult || _duplicateStringStats.Length == 0)
+            {
+                VumsEditorStyles.DrawEmptyState(
+                    "暂无重复字符串",
+                    _analyzing ? "正在检测重复字符串..." : "请选择一个 .snap 快照文件开始分析。");
+                return;
+            }
+
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+            {
+                VumsEditorStyles.DrawSectionHeader(
+                    $"重复字符串 Top {TopDuplicateStringCount}",
+                    "仅统计快照中出现次数 > 1 的托管字符串；每行“可避免”= 总大小 − 单个实例大小，即重复分配浪费的部分。");
+                OverviewValueRow("重复字符串可避免内存", FormatBytes(_duplicateAvoidableBytes));
+                OverviewValueRow("重复字符串条目数", $"{_duplicateStringStats.Length:N0}");
+            }
+
+            GUILayout.Space(VumsEditorStyles.SectionSpacing);
+            DrawDuplicateSourceSummary();
+
+            GUILayout.Space(VumsEditorStyles.SectionSpacing);
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+            {
+                VumsEditorStyles.DrawSectionHeader(
+                    $"重复字符串明细（{_duplicateStringStats.Length:N0} 条）",
+                    "每行标注推断来源；悬停字符串可看完整内容与对应优化建议，右键复制整行。");
+                foreach (var stat in _duplicateStringStats)
+                {
+                    var preview = stat.Value
+                        .Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
+                    if (preview.Length > 120)
+                        preview = preview.Substring(0, 120) + "...";
+
+                    var sourceLabel = VumsStringSourceHelper.Label(stat.Source);
+                    var suggestion = VumsStringSourceHelper.Suggestion(stat.Source);
+                    var copyText =
+                        $"{stat.Count,6:N0} x | 总计 {FormatBytes(stat.TotalBytes)} | 可避免 {FormatBytes(stat.DuplicateBytes)} | [{sourceLabel}] \"{stat.Value}\"";
+                    var tooltip = $"完整内容：{stat.Value}\n来源：{sourceLabel}\n建议：{suggestion}";
+
+                    VumsEditorStyles.CopyableRow(
+                        this,
+                        EditorGUIUtility.singleLineHeight * 2f,
+                        copyText,
+                        () =>
+                        {
+                            using (new EditorGUILayout.HorizontalScope())
+                            {
+                                GUILayout.Label($"{stat.Count:N0} x", GUILayout.Width(64f));
+                                GUILayout.Label(FormatBytes(stat.TotalBytes), GUILayout.Width(88f));
+                                GUILayout.Label(FormatBytes(stat.DuplicateBytes), GUILayout.Width(88f));
+                                GUILayout.Label($"[{sourceLabel}]", VumsEditorStyles.MutedLabel, GUILayout.Width(96f));
+                                GUILayout.Label(new GUIContent(preview, tooltip), EditorStyles.wordWrappedLabel, GUILayout.ExpandWidth(true));
+                            }
+                        });
+                }
+            }
+        }
+
+        private void DrawDuplicateSourceSummary()
+        {
+            var groups = _duplicateStringStats
+                .GroupBy(item => item.Source)
+                .Select(g => new
+                {
+                    Source = g.Key,
+                    Count = g.Count(),
+                    Avoidable = g.Sum(item => item.DuplicateBytes),
+                })
+                .OrderByDescending(x => x.Avoidable)
+                .ToArray();
+
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+            {
+                VumsEditorStyles.DrawSectionHeader(
+                    "来源分类汇总",
+                    "按推断来源聚合“可避免内存”并降序排列；优先修靠前的来源类别，收益最大。");
+                foreach (var g in groups)
+                {
+                    var label = VumsStringSourceHelper.Label(g.Source);
+                    OverviewValueRow($"[{label}]（{g.Count:N0} 条）", FormatBytes(g.Avoidable));
+                    GUILayout.Label(
+                        VumsStringSourceHelper.Suggestion(g.Source),
+                        VumsEditorStyles.SectionDescription);
+                    GUILayout.Space(2f);
+                }
+            }
+        }
+
         private void DrawLargeObjectRetentionTab()
         {
             if (_largeObjectOptions.Length == 0)
@@ -769,11 +854,12 @@ namespace VUMS.Editor
                 return;
             }
 
+            // 按类型聚合：直接看出“这个类型贡献了多少 MB”，并可下钻到单个对象
+            DrawLargeObjectAggregation();
+
+            GUILayout.Space(VumsEditorStyles.SectionSpacing);
             using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
-                VumsEditorStyles.DrawSectionHeader(
-                    $"Top {TopLargeObjectCount} 大对象引用路径",
-                    "选择一个托管大对象，沿引用链逐层展开至 GC Root。");
                 EditorGUI.BeginChangeCheck();
                 _selectedLargeObjectIndex = EditorGUILayout.Popup(
                     "选择对象",
@@ -785,6 +871,79 @@ namespace VUMS.Editor
 
             GUILayout.Space(VumsEditorStyles.SectionSpacing);
             DrawRetentionTree(_largeObjects[_selectedLargeObjectIndex]);
+        }
+
+        /// <summary>
+        /// 把 Top N 大对象按类型合并，汇总每类贡献的总字节与占比；展开类型可逐个查看对象，
+        /// 点击对象即在下方引用链中定位它。重点回答“哪一类类型吃掉了最多内存”。
+        /// </summary>
+        private void DrawLargeObjectAggregation()
+        {
+            var total = _top20LargeObjectTotalBytes;
+            var byType = _largeObjects
+                .GroupBy(item => item.TypeName)
+                .Select(g => new
+                {
+                    TypeName = g.Key,
+                    Count = g.Count(),
+                    Bytes = g.Sum(item => (long)item.SizeBytes),
+                })
+                .OrderByDescending(x => x.Bytes)
+                .ToArray();
+
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+            {
+                VumsEditorStyles.DrawSectionHeader(
+                    $"按类型聚合（Top {TopLargeObjectCount} 大对象）",
+                    $"同类型大对象合并统计；展开可见每个对象，点击即在下方引用链定位。共 {byType.Length:N0} 个类型，合计 {FormatBytes(total)}。");
+                foreach (var entry in byType)
+                {
+                    var ratio = total > 0 ? entry.Bytes * 100.0 / total : 0.0;
+                    var headerText =
+                        $"{entry.TypeName} | {entry.Count:N0} 个 | 合计 {FormatBytes(entry.Bytes)} | 占 {ratio:F1}%";
+                    var expanded = _expandedLargeObjectTypeKeys.Contains(entry.TypeName);
+                    expanded = EditorGUILayout.Foldout(expanded, headerText, true, VumsEditorStyles.Foldout);
+                    SetGroupState(_expandedLargeObjectTypeKeys, entry.TypeName, expanded);
+                    if (!expanded)
+                        continue;
+
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        GUILayout.Space(18f);
+                        using (new EditorGUILayout.VerticalScope())
+                        {
+                            foreach (var obj in _largeObjects.Where(item => item.TypeName == entry.TypeName))
+                            {
+                                var leaf = obj.RetentionPathNodes != null && obj.RetentionPathNodes.Length > 0
+                                    ? obj.RetentionPathNodes[obj.RetentionPathNodes.Length - 1]
+                                    : obj.TypeName;
+                                var rowText =
+                                    $"{FormatBytes(obj.SizeBytes),10} | @0x{obj.Address:X} | {leaf}";
+                                VumsEditorStyles.CopyableRow(
+                                    this,
+                                    EditorGUIUtility.singleLineHeight,
+                                    rowText,
+                                    () =>
+                                    {
+                                        using (new EditorGUILayout.HorizontalScope())
+                                        {
+                                            GUILayout.Space(18f);
+                                            GUILayout.Label(FormatBytes(obj.SizeBytes), GUILayout.Width(88f));
+                                            GUILayout.Label($"@0x{obj.Address:X}", GUILayout.Width(120f));
+                                            GUILayout.Label(leaf, GUILayout.ExpandWidth(true));
+                                        }
+                                    },
+                                    () =>
+                                    {
+                                        _selectedLargeObjectIndex = _largeObjects.IndexOf(obj);
+                                        ResetRetentionTreeExpansion();
+                                        Repaint();
+                                    });
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         private void DrawRetentionTree(RetainedObjectInfo retainedObject)
@@ -1337,7 +1496,8 @@ namespace VUMS.Editor
             _expandedLeakGroupKeys.Clear();
             _showLeakGroupObjectKeys.Clear();
             _managedLeakResultText = "正在分析托管内存泄漏...";
-            _duplicateStringResultText = "正在分析重复字符串...";
+            _duplicateStringStats = Array.Empty<DuplicateStringStat>();
+            _hasDuplicateStringResult = false;
             _duplicateAvoidableBytes = 0;
             _top20LargeObjectTotalBytes = 0;
             _nativeStats = default;
@@ -1349,6 +1509,7 @@ namespace VUMS.Editor
             _largeNativeObjects.Clear();
             _expandedNativeTypeKeys.Clear();
             _expandedNativeTypeLargeObjectKeys.Clear();
+            _expandedLargeObjectTypeKeys.Clear();
             _duplicateSectionExpanded = false;
             _largeObjectSectionExpanded = false;
             _residentNativeGroups.Clear();
@@ -1538,6 +1699,8 @@ namespace VUMS.Editor
             public long TotalBytes;
             public long SingleInstanceBytes;
             public long DuplicateBytes => Math.Max(0, TotalBytes - SingleInstanceBytes);
+            // 推断的来源写法，用于“来源建议”
+            public DuplicateStringSource Source;
         }
 
         private static string FormatBytes(long bytes)
@@ -1692,7 +1855,7 @@ namespace VUMS.Editor
             {
                 const string error = "错误：文件路径为空或文件不存在。";
                 _managedLeakResultText = error;
-                _duplicateStringResultText = error;
+                _hasDuplicateStringResult = false;
                 _analyzing = false;
                 Repaint();
                 return;
@@ -1703,7 +1866,6 @@ namespace VUMS.Editor
 
             try
             {
-                var duplicateStringSb = new StringBuilder();
                 var totalStart = DateTime.Now;
 
                 EditorUtility.DisplayProgressBar("分析中", "正在读取快照文件...", 0.1f);
@@ -1788,6 +1950,7 @@ namespace VUMS.Editor
                         {
                             Value = managedString.Value,
                             SingleInstanceBytes = managedString.SizeBytes,
+                            Source = VumsStringSourceHelper.Classify(managedString.Value),
                         };
                         duplicateStrings.Add(managedString.Value, stringStat);
                     }
@@ -1801,26 +1964,9 @@ namespace VUMS.Editor
                     .OrderByDescending(item => item.DuplicateBytes)
                     .Take(TopDuplicateStringCount)
                     .ToArray();
-                if (repeatedStrings.Length == 0)
-                {
-                    duplicateStringSb.AppendLine("  未发现重复字符串实例。");
-                }
-                else
-                {
-                    foreach (var stringStat in repeatedStrings)
-                    {
-                        var preview = stringStat.Value
-                            .Replace("\r", "\\r")
-                            .Replace("\n", "\\n")
-                            .Replace("\t", "\\t");
-                        if (preview.Length > 100)
-                            preview = preview.Substring(0, 100) + "...";
-
-                        duplicateStringSb.AppendLine(
-                            $"  {stringStat.Count,6:N0} x | 总计 {FormatBytes(stringStat.TotalBytes),10} | \"{preview}\"");
-                    }
-                }
+                _duplicateStringStats = repeatedStrings;
                 _duplicateAvoidableBytes = repeatedStrings.Sum(item => item.DuplicateBytes);
+                _hasDuplicateStringResult = repeatedStrings.Length > 0;
 
                 EditorUtility.DisplayProgressBar("分析中", "正在检测泄漏的 Managed Shell...", 0.85f);
                 var unityObjects = allObjects.Where(i => i.InheritsFromUnityEngineObject(file)).ToArray();
@@ -1850,13 +1996,12 @@ namespace VUMS.Editor
                     _leakReasonCounts[(int)leaked.Reason]++;
                 _hasManagedLeakResult = true;
                 _managedLeakResultText = "";
-                _duplicateStringResultText = duplicateStringSb.ToString();
             }
             catch (Exception e)
             {
                 var error = $"分析过程中发生错误:\n{e.GetType().Name}: {e.Message}\n\n{e.StackTrace}";
                 _managedLeakResultText = error;
-                _duplicateStringResultText = error;
+                _hasDuplicateStringResult = false;
                 Debug.LogError($"[VUMS] ManagedMemoryLeakAnalysis 分析失败: {e}");
             }
             finally

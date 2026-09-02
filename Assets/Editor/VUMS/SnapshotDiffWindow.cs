@@ -594,6 +594,8 @@ namespace VUMS.Editor
             }
 
             var lastIndex = _snapshots.Count - 1;
+            DrawDuplicateSourceSummary(series, lastIndex);
+
             var topRows = series
                 .OrderByDescending(item => item.Bytes[lastIndex])
                 .ThenBy(item => item.Value, StringComparer.Ordinal)
@@ -613,8 +615,40 @@ namespace VUMS.Editor
             }
         }
 
-        private static void OverviewValueRow(string label, string value)
+        /// <summary>
+        /// 按推断来源聚合“最终快照占用字节”并降序展示，直接给出优化优先级。
+        /// </summary>
+        private void DrawDuplicateSourceSummary(List<DuplicateStringSeries> series, int lastIndex)
         {
+            var groups = series
+                .GroupBy(item => item.Source)
+                .Select(g => new
+                {
+                    Source = g.Key,
+                    Count = g.Count(),
+                    Bytes = g.Sum(item => item.Bytes[lastIndex]),
+                })
+                .OrderByDescending(x => x.Bytes)
+                .ToArray();
+
+            using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
+            {
+                VumsEditorStyles.DrawSectionHeader(
+                    "来源分类汇总",
+                    "按推断来源聚合“最终快照占用字节”并降序排列；优先修靠前的来源类别，收益最大。");
+                foreach (var g in groups)
+                {
+                    var label = VumsStringSourceHelper.Label(g.Source);
+                    OverviewValueRow($"[{label}]（{g.Count:N0} 条）", FormatBytes(g.Bytes));
+                    GUILayout.Label(
+                        VumsStringSourceHelper.Suggestion(g.Source),
+                        VumsEditorStyles.SectionDescription);
+                    GUILayout.Space(2f);
+                }
+            }
+        }
+
+        private static void OverviewValueRow(string label, string value)        {
             VumsEditorStyles.DrawMetricRow(label, value, 220f);
         }
 
@@ -891,6 +925,8 @@ namespace VUMS.Editor
             public long[] Bytes;
             public bool[] Present;
             public DuplicateDeltaStatus Status;
+            // 推断的来源写法，用于“来源建议”
+            public DuplicateStringSource Source;
         }
 
         /// <summary>
@@ -928,6 +964,7 @@ namespace VUMS.Editor
                     Bytes = bytes,
                     Present = present,
                     Status = GetSeriesStatus(counts, present),
+                    Source = VumsStringSourceHelper.Classify(key),
                 });
             }
             return rows;
@@ -1004,7 +1041,7 @@ namespace VUMS.Editor
                     sb.Append("无");
                 }
             }
-            sb.Append(" | ").Append(StatusLabel(row.Status));
+            sb.Append(" | [").Append(VumsStringSourceHelper.Label(row.Source)).Append("] ").Append(StatusLabel(row.Status));
 
             VumsEditorStyles.CopyableRow(
                 window,
@@ -1014,10 +1051,17 @@ namespace VUMS.Editor
                 {
                     using (new EditorGUILayout.HorizontalScope())
                     {
-                        var label = isTruncated
-                            ? new GUIContent(displayedPreview, preview)
-                            : new GUIContent(displayedPreview);
-                        GUILayout.Label(label, GUILayout.ExpandWidth(true));
+                        var sourceLabel = VumsStringSourceHelper.Label(row.Source);
+                        var suggestion = VumsStringSourceHelper.Suggestion(row.Source);
+                        var tip = (isTruncated ? preview : row.Value)
+                            + "\n来源：" + sourceLabel
+                            + "\n建议：" + suggestion;
+                        using (new EditorGUILayout.VerticalScope(GUILayout.ExpandWidth(true)))
+                        {
+                            GUILayout.Label(new GUIContent(displayedPreview, tip), EditorStyles.wordWrappedLabel);
+                            GUILayout.Label("[" + sourceLabel + "]", VumsEditorStyles.MutedLabel);
+                        }
+
                         for (var i = 0; i < row.Counts.Length; i++)
                             DrawSeriesCell(row, i);
                         DrawColoredStatus(row.Status, 48f);

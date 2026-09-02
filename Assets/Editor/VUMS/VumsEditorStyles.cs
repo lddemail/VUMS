@@ -31,7 +31,6 @@ namespace VUMS.Editor
         internal static GUIStyle MutedLabel { get; private set; }
         internal static GUIStyle SelectableRow { get; private set; }
         internal static GUIStyle Foldout { get; private set; }
-        internal static GUIStyle CodeTextArea { get; private set; }
 
         internal static Color Success => GUI.skin.label.normal.textColor;
         internal static Color Warning => GUI.skin.label.normal.textColor;
@@ -67,7 +66,6 @@ namespace VUMS.Editor
             MutedLabel = EditorStyles.miniLabel;
             SelectableRow = EditorStyles.label;
             Foldout = EditorStyles.foldout;
-            CodeTextArea = EditorStyles.textArea;
         }
 
         // 原生标题 + 副标题，无彩色 banner。
@@ -117,6 +115,14 @@ namespace VUMS.Editor
         /// </summary>
         internal static void CopyableRow(EditorWindow window, float height, string copyText, Action drawContent)
         {
+            CopyableRow(window, height, copyText, drawContent, null);
+        }
+
+        /// <summary>
+        /// 可复制行；onTap 不为 null 时，左键点击整行触发该回调（右键仍复制）。
+        /// </summary>
+        internal static void CopyableRow(EditorWindow window, float height, string copyText, Action drawContent, Action onTap)
+        {
             EnsureInitialized();
             if (drawContent == null)
                 return;
@@ -142,6 +148,14 @@ namespace VUMS.Editor
                         window?.ShowNotification(new GUIContent("已复制行内容"));
                     });
                 menu.ShowAsContext();
+                return;
+            }
+
+            if (onTap != null && Event.current.type == EventType.MouseDown
+                && Event.current.button == 0 && rect.Contains(Event.current.mousePosition))
+            {
+                Event.current.Use();
+                onTap();
             }
 
             // 把内容拉回到刚预留出的行区域内，使其正好覆盖整行。
