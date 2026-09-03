@@ -18,7 +18,7 @@ namespace VUMS.Editor
     /// leaked managed shells (UnityEngine.Object instances whose native object is gone)
     /// inside a .snap memory snapshot captured by the Unity Memory Profiler.
     /// </summary>
-    public class ManagedMemoryLeakAnalysisWindow : EditorWindow
+    public class VumsManagedMemoryWindow : EditorWindow
     {
         private string _snapPath = "";
         private string _captureTimeText = "-";
@@ -95,34 +95,15 @@ namespace VUMS.Editor
         [MenuItem("VUMS/ManagedMemoryLeakAnalysis", false, 2)]
         public static void OpenWindow()
         {
-            var window = GetWindow<ManagedMemoryLeakAnalysisWindow>(true, "Managed Memory Leak Analysis", true);
+            var window = GetWindow<VumsManagedMemoryWindow>(true, "Managed Memory Leak Analysis", true);
             window.minSize = new Vector2(560, 520);
             window.Show();
         }
 
-        [MenuItem("VUMS/ExportPackage", false, 1)]
-        public static void ExportPackage()
+        [MenuItem("VUMS/Settings", false, 0)]
+        public static void OpenSettings()
         {
-            // 只导出工具本身：UMS 库 DLL 与 Editor 窗口脚本，不带入任何依赖
-            var folders = new[]
-            {
-                "Assets/ThirdParty/VUMS",
-                "Assets/Editor/VUMS",
-            };
-
-            // Build 目录放在与 Assets 同级（Unity 不会导入该目录）
-            var projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
-            var buildDir = Path.Combine(projectRoot, "Build");
-            if (!Directory.Exists(buildDir))
-                Directory.CreateDirectory(buildDir);
-
-            var exportPath = Path.Combine(buildDir, "VUMS.unitypackage");
-
-            Debug.Log($"[VUMS] 开始导出 package 到: {exportPath}");
-            AssetDatabase.ExportPackage(folders, exportPath, ExportPackageOptions.Recurse);
-            Debug.Log($"[VUMS] 已导出 package 到: {exportPath}");
-
-            EditorUtility.DisplayDialog("导出完成", $"已导出 Unity Package 到:\n{exportPath}", "确定");
+            VumsSettingsWindow.ShowWindow();
         }
 
         private void OnGUI()

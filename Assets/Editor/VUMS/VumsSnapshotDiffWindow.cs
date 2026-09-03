@@ -16,7 +16,7 @@ namespace VUMS.Editor
     /// 多快照对比窗口：按 A → B → C → D → E 顺序选择 2～5 份快照，手动开始分析。
     /// A 为基准，最后一个已选择快照为最终对比，同时展示完整快照序列。
     /// </summary>
-    public class SnapshotDiffWindow : EditorWindow
+    public class VumsSnapshotDiffWindow : EditorWindow
     {
         private const int MaxSnapshotCount = 5;
         // 重复字符串合并对比表每对展示前 N 行；改这里即可调整对比展示数量
@@ -39,7 +39,7 @@ namespace VUMS.Editor
         [MenuItem("VUMS/SnapshotDiff", false, 3)]
         public static void OpenWindow()
         {
-            var window = GetWindow<SnapshotDiffWindow>(true, "Snapshot Diff", true);
+            var window = GetWindow<VumsSnapshotDiffWindow>(true, "Snapshot Diff", true);
             // 需要容纳“类型名 + 新增/消失标记 + A→E 序列 + 趋势列 + 迷你柱状图”，
             // 宽度不足时趋势列会自动降级为纯文字，故这里给出能完整展示的默认宽度。
             window.minSize = new Vector2(1000, 620);
@@ -56,9 +56,6 @@ namespace VUMS.Editor
 
             using (new EditorGUILayout.VerticalScope(VumsEditorStyles.Card))
             {
-                VumsEditorStyles.DrawSectionHeader(
-                    "快照序列",
-                    "至少选择 A、B 两个快照，最多五个；不能跳过槽位。清除任一快照时会同时清除其后的快照。");
                 DrawSnapshotSelectors();
                 GUILayout.Space(6f);
                 DrawAnalyzeButton();
@@ -95,6 +92,8 @@ namespace VUMS.Editor
 
         private void DrawSnapshotSelectors()
         {
+            // 限制路径文本框最大宽度，避免未选快照时中间留白把左右按钮拉得太开
+            var maxFieldWidth = Mathf.Max(160f, position.width - 340f);
             for (var index = 0; index < MaxSnapshotCount; index++)
             {
                 var hasPath = !string.IsNullOrEmpty(_paths[index]);
@@ -121,7 +120,7 @@ namespace VUMS.Editor
                     EditorGUI.EndDisabledGroup();
 
                     EditorGUI.BeginDisabledGroup(true);
-                    EditorGUILayout.TextField(hasPath ? _paths[index] : "未选择", GUILayout.Height(24f));
+                    EditorGUILayout.TextField(hasPath ? _paths[index] : "未选择", GUILayout.Height(24f), GUILayout.MaxWidth(maxFieldWidth));
                     EditorGUI.EndDisabledGroup();
 
                     var canClear = !_diffing && hasPath;
@@ -143,14 +142,14 @@ namespace VUMS.Editor
                 if (GUILayout.Button(
                         _diffing ? "正在分析..." : $"开始分析 {selectedCount} 个快照",
                         VumsEditorStyles.PrimaryButton,
-                        GUILayout.Width(220f),
-                        GUILayout.Height(32f)))
+                        GUILayout.Width(200f),
+                        GUILayout.Height(26f)))
                     BeginAnalysis();
                 EditorGUI.EndDisabledGroup();
                 GUILayout.FlexibleSpace();
             }
 
-            GUILayout.Space(2f);
+           GUILayout.Space(2f);
         }
 
         private string GetStartDirectory(int index)
